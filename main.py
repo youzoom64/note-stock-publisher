@@ -66,7 +66,8 @@ def main():
         (data / 'browser-smoke.json').write_text(json.dumps(result),encoding='utf-8')
         return 0 if result['result']=='passed' else 1
     from PySide6.QtCore import QLockFile, QTimer
-    from PySide6.QtWidgets import QApplication, QMessageBox
+    from PySide6.QtWidgets import QMessageBox
+    from note_stock.windows_accessibility import create_application
     app = None
     diagnostics = None
     session = None
@@ -81,7 +82,7 @@ def main():
         application_root = app_folder().resolve()
         application_lock = QLockFile(str(application_root / 'application.lock'))
         if not application_lock.tryLock(0):
-            app = QApplication(sys.argv[:1])
+            app = create_application(sys.argv[:1])
             existing = request_running(application_root, {'command': 'activate'})
             if existing and existing.get('ok'):
                 return 0
@@ -102,7 +103,7 @@ def main():
             log_warning = '診断ログを開始できません。ログの保存先を確認してください。'
         diagnostics.record('application_start', pid=os.getpid())
         stage = 'create_gui'
-        app = QApplication(sys.argv[:1])
+        app = create_application(sys.argv[:1])
         app.setApplicationName("NoteStockPublisher")
         app.setQuitOnLastWindowClosed(False)
         from note_stock.ui import MainWindow, STYLE
@@ -133,7 +134,7 @@ def main():
         if diagnostics:
             diagnostics.error('application_error',exc,stage=stage)
         if app is None:
-            app = QApplication(sys.argv[:1])
+            app = create_application(sys.argv[:1])
         QMessageBox.critical(None, "noteストックを起動できません", str(exc) + "\n書き込み可能なフォルダーへ展開して起動してください。")
         return 1
     finally:
