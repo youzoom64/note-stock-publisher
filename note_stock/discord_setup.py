@@ -12,6 +12,86 @@ from .diagnostics import Diagnostics
 PORTAL='https://discord.com/developers/applications'
 
 
+class ManualSetup(QThread):
+    """Verify the manually installed Bot before replacing any local settings."""
+    outcome=Signal(bool,str)
+
+    def __init__(self,store,token,guild,parent=None):
+        super().__init__(parent)
+        self.store,self.token,self.guild=store,token,guild
+        self.cancel=threading.Event()
+        self.settings=None
+
+    def discord_get(self,path):
+        request=Request('https://discord.com/api/v10/'+path,
+                        headers={'Authorization':'Bot '+self.token,'User-Agent':'NoteStockPublisher/2.0'})
+        with urlopen(request,timeout=8) as response:
+            return json.load(response)
+
+    def run(self):
+        try:
+            if not re.fullmatch(r'[a-zA-Z0-9._-]{20,256}',self.token):
+                raise ValueError('BotトークンをDiscordの「Bot」画面からコピーし直してください。')
+            if not re.fullmatch(r'[0-9]{16,22}',self.guild):
+                raise ValueError('Discordの導入先サーバーのIDを入力してください。')
+            try:
+                app=self.discord_get('oauth2/applications/@me')
+            except HTTPError as exc:
+                if exc.code not in {401,403}:
+                    raise
+                raise ValueError('Botトークンを確認できません。Discordの「Bot」画面からコピーし直してください。') from None
+            application=str(app.get('id',''))
+            if app.get('team') is not None or not re.fullmatch(r'[0-9]{16,22}',application):
+                raise ValueError('自分のアカウントが個人で所有するBotを使ってください。')
+            try:
+                guild=self.discord_get('guilds/'+self.guild)
+            except HTTPError as exc:
+                if exc.code not in {403,404}:
+                    raise
+                raise ValueError('指定のサーバーにBotが入り、サーバーIDが合っていることを確認してください。') from None
+            if str(guild.get('id',''))!=self.guild:
+                raise ValueError('指定のサーバーにBotが導入されていることを確認してください。')
+            if not self.cancel.is_set():
+                self.settings=application,self.guild,protect(self.token)
+                self.outcome.emit(True,'Botの導入を確認しました。管理メニューを準備しています。')
+        except ValueError as exc:
+            Diagnostics(self.store).error('discord_manual_setup_error',exc)
+            self.outcome.emit(False,str(exc))
+        except Exception as exc:
+            Diagnostics(self.store).error('discord_manual_setup_error',exc)
+            self.outcome.emit(False,'Discordへの接続確認に失敗しました。接続状況を確認してやり直してください。')
+        finally:
+            self.token=''
+
+
+def save_manual_setup(store,application,guild,encrypted_token):
+    with store.connect() as connection:
+        connection.execute('BEGIN IMMEDIATE')
+        def read(key,default):
+            row=connection.execute('SELECT value FROM settings WHERE key=?',(key,)).fetchone()
+            return json.loads(row[0]) if row else default
+
+        config=read('discord',{})
+        same_application=str(config.get('application'))==application
+        same_guild=str(config.get('guild'))==guild
+        values={}
+        if not same_application:
+            config={'application':application,'guild':guild}
+            values={'discord_destinations':{},'discord_activity_oauth_ready':False}
+            activity=read('remote_relogin',{})
+            activity.update(schedule_verified=False,activity_confirmed=False)
+            values['remote_relogin']=activity
+        elif not same_guild:
+            destinations=read('discord_destinations',{})
+            set_destination(config,destinations,guild)
+            values['discord_destinations']=destinations
+        values.update(discord=config,discord_setup={'application':application,'stage':'installed','selected_guild':guild},
+                      discord_token=encrypted_token,discord_enabled=True,
+                      discord_onboarding={'enabled':True,'mode':'manual'})
+        connection.executemany('INSERT OR REPLACE INTO settings VALUES(?,?)',
+                               [(key,json.dumps(value,ensure_ascii=False)) for key,value in values.items()])
+
+
 def interrupted_browser_operation(exc):
     from playwright.sync_api import TimeoutError
     return isinstance(exc, TimeoutError) or type(exc).__name__=='TargetClosedError' or (
@@ -27,14 +107,18 @@ def select_destination(store,guild):
         raise RuntimeError('導入先サーバーを確認できません。')
     config=store.setting('discord',{})
     destinations=store.setting('discord_destinations',{})
+    set_destination(config,destinations,guild)
+    store.set_setting('discord_destinations',destinations)
+    store.set_setting('discord',config)
+
+
+def set_destination(config,destinations,guild):
     if config.get('guild'):
         destinations[str(config['guild'])]={key:config[key] for key in ('channel','menu','category','installation') if key in config}
     if str(config.get('guild',''))!=str(guild):
         for key in ('channel','menu','category','installation'): config.pop(key,None)
         config.update(destinations.get(str(guild),{}))
     config['guild']=str(guild)
-    store.set_setting('discord_destinations',destinations)
-    store.set_setting('discord',config)
 
 
 def replace_missing_application(store, application):
@@ -72,6 +156,7 @@ def replace_missing_application(store, application):
 
 class PortalSetup(QThread):
     progress=Signal(str)
+    action_required=Signal(str)
     outcome=Signal(bool,str)
     def __init__(self,store,parent=None):
         super().__init__(parent)
@@ -82,13 +167,20 @@ class PortalSetup(QThread):
         state.update(values)
         self.store.set_setting('discord_setup',state)
         return state
-    def until(self,condition,message,seconds=600,*,after_auth=None,find_page=None):
+    def until(self,condition,message,seconds=600,*,after_auth=None,find_page=None,user_action=None):
+        try:
+            return self.wait_for_portal(condition,message,seconds,after_auth,find_page,user_action)
+        finally:
+            self.action_required.emit('')
+
+    def wait_for_portal(self,condition,message,seconds,after_auth,find_page,user_action):
         self.progress.emit(message)
         end=time.monotonic()+seconds
         notice=''
         was_authenticating=False
         auth_dialog_closed=False
         reconnect_notice=False
+        pending_action=''
         while time.monotonic()<end:
             if self.cancel.is_set(): raise RuntimeError('セットアップを中断しました。同じBotから再開できます。')
             try:
@@ -107,11 +199,19 @@ class PortalSetup(QThread):
                             self.checkpoint(authentication_pending=True)
                             self.progress.emit(current)
                             notice=current
-                    elif was_authenticating and after_auth:
-                        was_authenticating=False
-                        auth_dialog_closed=True
-                        notice=''
-                        self.progress.emit(after_auth)
+                    else:
+                        captcha=page.locator('iframe[src*="hcaptcha.com"][title*="challenge" i]').first
+                        current=('表示中のDiscord画面でCAPTCHAを完了してください。' if self.visible(captcha)
+                                 else (user_action() if user_action else ''))
+                        if was_authenticating:
+                            was_authenticating=False
+                            auth_dialog_closed=True
+                            notice=''
+                            if after_auth:
+                                self.progress.emit(after_auth)
+                    if current!=pending_action:
+                        self.action_required.emit(current)
+                        pending_action=current
                     page.wait_for_timeout(300)
                     reconnect_notice=False
                     continue
@@ -121,6 +221,9 @@ class PortalSetup(QThread):
                 if not reconnect_notice:
                     Diagnostics(self.store).error('discord_setup_connection_interrupted',exc)
             if not reconnect_notice:
+                if pending_action:
+                    self.action_required.emit('')
+                    pending_action=''
                 self.progress.emit('認証の完了後、同じBotの設定画面と接続情報が戻るのを待っています。')
                 reconnect_notice=True
             self.cancel.wait(0.5)
@@ -353,7 +456,14 @@ class PortalSetup(QThread):
                         clicked.add(pattern)
                         break
                 return bool(approved)
-            self.until(continue_installation,'Botを自動導入しています。既存サーバーの場合は導入先だけ選んでください。本人認証が表示された場合は完了してください。')
+            def select_server():
+                if not guild and r'^Continue$|^続行$' not in clicked and not candidate['guild']:
+                    picker=self.page.get_by_role('combobox')
+                    if self.visible(picker):
+                        return 'Discord画面でBotの導入先サーバーを選んでください。'
+                return ''
+            self.until(continue_installation,'Botを自動導入しています。',
+                       user_action=select_server)
             if guild and approved['guild']!=guild: raise RuntimeError('作成したサーバーと導入先が一致しません。')
             select_destination(self.store,approved['guild'])
             self.checkpoint(stage='installed',selected_guild=approved['guild'])
@@ -390,7 +500,9 @@ class PortalSetup(QThread):
                 if self.visible(login):
                     login.click()
                 self.until(lambda:'/login' not in self.page.url and self.visible(self.button('New Application|新しいアプリ|新規アプリ')),
-                          'Discordへログインしてください。二段階認証などはこのブラウザーで完了してください。')
+                           'Discordへのログイン状態を確認しています。',
+                           user_action=lambda: '表示中のDiscord画面でログインしてください。'
+                           if '/login' in self.page.url or self.visible(login) else '')
                 if not state.get('application'):
                     phase='専用アプリ作成'
                     if not state.get('name'):

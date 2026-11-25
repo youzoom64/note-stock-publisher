@@ -72,6 +72,7 @@ def test_validation_failures_record_result_and_queue_no_mutation(tmp_path,proble
             await client.tree.get_command('note_new').callback(interaction(None),title='title',body='')
         elif problem=='invalid-article-tags':
             pid=store.create({'title':'sample','body':'body'})
+            store.checkpoint(pid,key='n123456789abc')
             with store.connect() as c:c.execute('UPDATE posts SET native_ready=1 WHERE id=?',(pid,))
             before=store.get(pid);modal=TagsModal(client,pid);modal.tags._value='bad#tag'
             await modal.on_submit(i)
@@ -110,6 +111,7 @@ def test_opening_modal_keeps_parent_usable_when_discord_cancels_input(tmp_path,r
     async def run():
         store,client=setup(tmp_path)
         pid=store.create({'title':'sample','body':'body'})
+        store.checkpoint(pid,key='n123456789abc')
         with store.connect() as c: c.execute('UPDATE posts SET native_ready=1 WHERE id=?',(pid,))
         parent=Menu(client) if route=='new' else ArticleView(client,store.get(pid))
         session=parent.session; i=interaction(); flow(client).install(parent,i.message)
@@ -228,16 +230,17 @@ def test_retry_after_result_send_does_not_send_the_execution_record_twice(tmp_pa
 def test_processing_screen_is_removed_when_the_new_menu_arrives(tmp_path):
     async def run():
         store,client=setup(tmp_path); pid=store.create({'title':'sample','body':'body'})
+        client.loading_emoji='<a:note_loading:123456789012345678>'
         i=interaction(); view=Confirm(client,store.get(pid),'delete_note')
         flow(client).install(view,i.message)
         await view.yes.callback(i)
         receipt=i.edit_original_response.call_args.kwargs
-        assert receipt['content'].startswith('記事削除.') and receipt['view'] is None
+        assert receipt['content'].startswith(client.loading_emoji+' 処理中: 記事削除') and receipt['view'] is None
         assert view not in client.operation_views
         assert not store.setting('discord')['menu']
         await client.activate_menu(200)
         i.message.delete.assert_awaited_once(); client.http.edit_message.assert_not_awaited()
-        assert i.edit_original_response.await_count==1
+        assert i.edit_original_response.await_count==2
         await client.close()
     asyncio.run(run())
 

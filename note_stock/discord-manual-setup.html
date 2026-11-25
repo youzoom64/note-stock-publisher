@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>Discordを手動で設定する手順</title>
+<style>
+  body { color: #25342f; background: #ffffff; font-size: 14px; }
+  h1 { font-size: 23px; }
+  h2 { font-size: 17px; margin-top: 22px; }
+  a { color: #076243; }
+</style>
+</head>
+<body>
+<h1>Discordを手動で設定する手順</h1>
+<table cellpadding="9" cellspacing="0"><tr><td bgcolor="#106b4b">
+<a href="note-stock:automatic" style="color:#ffffff; font-weight:bold; text-decoration:none;">やっぱり自動で設定する</a>
+</td></tr></table>
+<h2>1. Discordで専用アプリを作成する</h2>
+<p><a href="https://discord.com/developers/applications">Discord開発者ポータルを開く</a>を押し、ご自身のDiscordアカウントでログインします。「新しいアプリケーション（New Application）」を押し、名前を「note管理」にします。開発者向けの規約を確認して作成してください。所有者はご自身のアカウントを選びます。</p>
+<h2>2. サーバーに導入できるように設定する</h2>
+<p>左の「インストール（Installation）」で「ギルドのインストール（Guild Install）」だけを有効にし、「インストールリンク（Install Link）」を「なし（None）」にして保存します。</p>
+<p>左の「Bot」で「公開Bot（Public Bot）」をオフにし、「OAuth2コード付与を要求（Requires OAuth2 Code Grant）」もオフにします。「変更を保存」が表示されたら保存してください。</p>
+<h2>3. Botを導入する</h2>
+<p>左の「OAuth2」にある「URL Generator」で <b>bot</b> と <b>applications.commands</b> を選びます。Botの権限は次の6件です。</p>
+<ul>
+  <li>チャンネルの管理（Manage Channels）</li>
+  <li>チャンネルを見る（View Channels）</li>
+  <li>メッセージを送信（Send Messages）</li>
+  <li>リンクの埋め込み（Embed Links）</li>
+  <li>ファイルを添付（Attach Files）</li>
+  <li>メッセージ履歴を読む（Read Message History）</li>
+</ul>
+<p>生成されたURLをブラウザーで開き、ご自身が管理できるサーバーを選んで認証します。サーバーを新しく作る場合は、先にDiscordのサーバー一覧の「＋」で作成してください。</p>
+<h2>4. 接続情報をnoteストックに入れる</h2>
+<ol>
+  <li>開発者ポータルの「Bot」で「トークンをリセット（Reset Token）」を押し、本人認証を済ませます。表示された値をnoteストックの「Botトークン」欄に貼り付けます。トークンはこの欄だけに貼り付けてください。</li>
+  <li>Discordで「ユーザー設定」→「詳細設定」→「開発者モード」をオンにします。導入先のサーバーアイコンを右クリックし、「サーバーIDをコピー」を押して、noteストックの「導入先のサーバーID」欄に貼り付けます。</li>
+  <li>noteストックで「保存して接続」を押します。導入が確認できると「note管理」チャンネルと操作メニューが準備されます。</li>
+</ol>
+<p><a href="https://docs.discord.com/developers/quick-start/getting-started">Discord公式のBot作成ガイド</a> ／ <a href="https://support-dev.discord.com/hc/en-us/articles/360028717192-Where-can-I-find-my-Application-Team-Server-ID">Discord公式のサーバーID確認手順</a></p>
+</body>
+</html>

@@ -106,14 +106,14 @@ def test_form_routing_has_no_individual_response_or_obsolete_notice_fallback():
             assert isinstance(node.func.value,ast.Attribute) and node.func.value.attr=='http',ast.unparse(node)
 
 
-def test_thirty_article_message_group_has_one_lifecycle_and_leaves_no_old_controls(tmp_path):
+def test_article_message_group_has_one_lifecycle_and_leaves_no_old_controls(tmp_path):
     async def run():
         store,client,pid=setup(tmp_path)
         for n in range(29):store.create({'title':'対象 '+str(n),'body':'body'})
         ui=flow(client);i=interaction();listing=Articles(client)
         await show_view(i,'edit_message','list',view=listing)
-        assert len(ui.state()['message_ids'])==4 and ui.state()['phase']=='ready'
-        assert len(client.operation_views)==4
+        assert len(ui.state()['message_ids'])==3 and ui.state()['phase']=='ready'
+        assert len(client.operation_views)==3
         assert all(part.session==listing.session for part in listing.parts)
         for part in listing.parts:
             click=interaction();click.message=part.message

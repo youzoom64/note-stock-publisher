@@ -29,6 +29,29 @@ def test_onboarding_choices_back_blank_name_and_cancel():
     assert existing.next.isEnabled() and not existing.name.isEnabled()
 
 
+def test_manual_opens_html_and_switches_to_automatic_from_the_guide():
+    from PySide6.QtCore import QPoint,Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QTextBrowser
+
+    app=QApplication.instance() or QApplication([])
+    dialog=DiscordSetupDialog()
+    dialog.show()
+    dialog.manual.click()
+    app.processEvents()
+    assert dialog.manual_guide.isVisible()
+    assert dialog.pages.currentIndex()==2 and not dialog.next.isEnabled()
+    browser=dialog.manual_guide.findChild(QTextBrowser)
+    assert 'チャンネルの管理' in browser.toPlainText()
+    target=next(QPoint(x,y) for y in range(110) for x in range(15,340,5)
+                if browser.anchorAt(QPoint(x,y))=='note-stock:automatic')
+    QTest.mouseClick(browser.viewport(),Qt.MouseButton.LeftButton,pos=target)
+    assert not dialog.manual_guide.isVisible()
+    assert dialog.pages.currentIndex()==1 and dialog.use.isChecked()
+    assert not dialog.next.isEnabled()
+    dialog.close()
+
+
 def test_skip_and_cancel_start_no_worker_and_skip_survives_restart(tmp_path,monkeypatch):
     from PySide6.QtWidgets import QWidget
     app=QApplication.instance() or QApplication([])

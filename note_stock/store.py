@@ -8,11 +8,14 @@ import shutil
 import sqlite3
 import uuid
 from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from .remote_store import RemoteStore
 
 JST = timezone(timedelta(hours=9))
+DEFAULT_ARTICLE_SYNC_MINUTES = 60
+MIN_ARTICLE_SYNC_MINUTES = 1
+MAX_ARTICLE_SYNC_MINUTES = 1440
 STATUSES = {
     "draft": "下書き", "queued": "定期投稿待ち", "scheduled": "日時指定待ち",
     "posting": "投稿中", "published": "投稿済み", "failed": "失敗",
@@ -25,6 +28,10 @@ LOCKED = {"posting", "published", "unknown", "editing", "native_reserved", "nati
 
 def now_ts():
     return datetime.now(timezone.utc).timestamp()
+
+
+def article_display_title(post, fallback='無題'):
+    return ('📃 ' if post.get('native_ready') else '')+(post.get('title') or fallback)
 
 
 def article_timestamp(post, catalog):
@@ -84,6 +91,15 @@ class Store(RemoteStore):
                     updated REAL NOT NULL, created REAL NOT NULL);
                 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS slots(key TEXT PRIMARY KEY, post_id TEXT, created REAL NOT NULL);
+                CREATE TABLE IF NOT EXISTS recurring_overrides(day TEXT PRIMARY KEY, post_id TEXT NOT NULL UNIQUE);
+                CREATE TABLE IF NOT EXISTS article_previews(post_id TEXT PRIMARY KEY, body TEXT NOT NULL, html TEXT NOT NULL);
+                CREATE TRIGGER IF NOT EXISTS article_preview_delete AFTER DELETE ON posts
+                    BEGIN DELETE FROM article_previews WHERE post_id=OLD.id; END;
+                CREATE TRIGGER IF NOT EXISTS recurring_override_delete AFTER DELETE ON posts
+                    BEGIN DELETE FROM recurring_overrides WHERE post_id=OLD.id; END;
+                CREATE TRIGGER IF NOT EXISTS recurring_override_remove AFTER UPDATE OF status ON posts
+                    WHEN NEW.status NOT IN ('queued','editing')
+                    BEGIN DELETE FROM recurring_overrides WHERE post_id=NEW.id; END;
                 CREATE TABLE IF NOT EXISTS history(
                     id INTEGER PRIMARY KEY AUTOINCREMENT, post_id TEXT NOT NULL,
                     at REAL NOT NULL, status TEXT NOT NULL, message TEXT NOT NULL);
@@ -97,6 +113,11 @@ class Store(RemoteStore):
             for name,definition in additions.items():
                 if name not in columns:
                     c.execute(f'ALTER TABLE posts ADD COLUMN {name} {definition}')
+            c.execute("""CREATE TRIGGER IF NOT EXISTS article_preview_invalidate
+                AFTER UPDATE OF body,native_html,draft_key ON posts
+                WHEN OLD.body IS NOT NEW.body OR OLD.native_html IS NOT NEW.native_html
+                     OR OLD.draft_key IS NOT NEW.draft_key
+                BEGIN DELETE FROM article_previews WHERE post_id=NEW.id; END""")
         self.init_remote()
         with self.connect() as c:
             c.execute('PRAGMA user_version=2')
@@ -124,6 +145,9 @@ class Store(RemoteStore):
                     not value.get('days') or any(type(d) is not int or d not in range(7) for d in value['days']) or
                     not re.fullmatch(r'(?:[01]\d|2[0-3]):[0-5]\d',value.get('time',''))):
                 raise ValueError('定期投稿の設定が正しくありません。')
+            if key == 'article_sync_minutes' and (type(value) is not int or
+                    not MIN_ARTICLE_SYNC_MINUTES <= value <= MAX_ARTICLE_SYNC_MINUTES):
+                raise ValueError('自動同期の間隔が正しくありません。')
             if key in {'window_size','splitter_sizes','management_splitter_sizes'} and (not isinstance(value,list) or len(value)!=2 or any(type(n) is not int or not 0<n<20000 for n in value)):
                 raise ValueError('画面サイズの設定が正しくありません。')
             if key == 'favorite_tags' and (not isinstance(value,list) or any(not isinstance(t,str) for t in value)):
@@ -156,6 +180,15 @@ class Store(RemoteStore):
             except Exception as exc:
                 results[key] = str(exc)
         return results
+
+    def set_note_connection_setting(self,key,value,default):
+        with self.connect() as c:
+            c.execute("BEGIN IMMEDIATE")
+            row=c.execute("SELECT value FROM settings WHERE key=?",(key,)).fetchone()
+            if value==(json.loads(row[0]) if row else default):
+                return
+            c.executemany("INSERT OR REPLACE INTO settings VALUES(?,?)",
+                          [(key,json.dumps(value,ensure_ascii=False)),('account_verified','false'),('paused','true')])
 
     @staticmethod
     def decode(row):
@@ -280,7 +313,7 @@ class Store(RemoteStore):
     def event(self, c, post_id, status, message, stamp):
         c.execute("INSERT INTO history(post_id,at,status,message) VALUES(?,?,?,?)", (post_id, stamp, status, message))
 
-    def recover(self, stamp=None):
+    def recover(self, stamp=None, *, start_automatic_posting=False):
         stamp = now_ts() if stamp is None else stamp
         changed = []
         with self.connect() as c:
@@ -295,6 +328,10 @@ class Store(RemoteStore):
                 c.execute("UPDATE posts SET status='draft',native_ready=0,error=?,updated=? WHERE id=?",(message,stamp,row['id']))
                 changed.append(row['id'])
             changed.extend(self._expire(c, stamp))
+            if start_automatic_posting:
+                verified=c.execute("SELECT value FROM settings WHERE key='account_verified'").fetchone()
+                paused=not (verified and json.loads(verified['value']) is True)
+                c.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('paused',?)",(json.dumps(paused),))
         return changed
 
     def _expire(self, c, stamp):
@@ -308,6 +345,51 @@ class Store(RemoteStore):
     def expire(self, stamp):
         with self.connect() as c:
             return self._expire(c, stamp)
+
+    def recurring_override(self, post_id):
+        with self.connect() as c:
+            row = c.execute('SELECT day FROM recurring_overrides WHERE post_id=?',(post_id,)).fetchone()
+        return row['day'] if row else None
+
+    def article_preview(self,post_id):
+        with self.connect() as c:
+            row=c.execute('SELECT body,html FROM article_previews WHERE post_id=?',(post_id,)).fetchone()
+        return dict(row) if row else None
+
+    def save_article_preview(self,post_id,draft_key,body,html):
+        with self.connect() as c:
+            c.execute('BEGIN IMMEDIATE')
+            row=c.execute('SELECT draft_key FROM posts WHERE id=?',(post_id,)).fetchone()
+            if not row or row['draft_key']!=draft_key:
+                raise ValueError('取得中に記事が変更されました。もう一度選び直してください。')
+            c.execute('INSERT OR REPLACE INTO article_previews VALUES(?,?,?)',(post_id,body,html))
+
+    def set_recurring_override(self, post_id, day, stamp=None):
+        stamp = now_ts() if stamp is None else stamp
+        if day is None:
+            with self.connect() as c:
+                c.execute('DELETE FROM recurring_overrides WHERE post_id=?',(post_id,))
+            return
+        day = date.fromisoformat(day)
+        recurrence = self.setting('recurrence',{'days':list(range(7)), 'time':'09:00'})
+        when = datetime.combine(day,datetime.strptime(recurrence['time'],'%H:%M').time(),tzinfo=JST)
+        if day.weekday() not in recurrence['days'] or when.timestamp() <= stamp:
+            raise ValueError('まだ実行されていない定期投稿の日を選んでください。')
+        with self.connect() as c:
+            c.execute('BEGIN IMMEDIATE')
+            self.require_schedulable(post_id,connection=c)
+            row=c.execute('SELECT status,editor_kind,native_ready,draft_key FROM posts WHERE id=?',(post_id,)).fetchone()
+            if row['status']!='queued':
+                raise ValueError('先にこの記事を定期投稿のキューに入れてください。')
+            if row['editor_kind']=='native' and not (row['native_ready'] and row['draft_key']):
+                raise ValueError('noteの本文と公開条件を確認してから差し込んでください。')
+            if c.execute('SELECT 1 FROM slots WHERE key=?',(when.isoformat(),)).fetchone():
+                raise ValueError('この日の定期投稿枠はすでに使われています。')
+            existing=c.execute('SELECT post_id FROM recurring_overrides WHERE day=?',(day.isoformat(),)).fetchone()
+            if existing and existing['post_id']!=post_id:
+                raise ValueError('この日には別の記事が差し込まれています。')
+            c.execute('INSERT INTO recurring_overrides VALUES(?,?) ON CONFLICT(post_id) DO UPDATE SET day=excluded.day',
+                      (day.isoformat(),post_id))
 
     def claim(self, stamp, post_id=None, slot=None):
         with self.connect() as c:
@@ -323,7 +405,13 @@ class Store(RemoteStore):
                 if row is None and slot:
                     if c.execute("SELECT 1 FROM slots WHERE key=?", (slot,)).fetchone():
                         return None
-                    row = c.execute("SELECT * FROM posts WHERE status='queued' ORDER BY position,created LIMIT 1").fetchone()
+                    day=slot.split('T',1)[0]
+                    row=c.execute("""SELECT p.* FROM recurring_overrides o JOIN posts p ON p.id=o.post_id
+                                       WHERE o.day=? AND p.status='queued'""",(day,)).fetchone()
+                    if row is None:
+                        row=c.execute("""SELECT p.* FROM posts p WHERE p.status='queued'
+                                      AND NOT EXISTS(SELECT 1 FROM recurring_overrides o WHERE o.post_id=p.id)
+                                      ORDER BY p.position,p.created LIMIT 1""").fetchone()
                     c.execute("INSERT INTO slots VALUES(?,?,?)", (slot, row["id"] if row else None, stamp))
                 if row is None:
                     return None
@@ -339,6 +427,16 @@ class Store(RemoteStore):
             self.event(c, item["id"], "posting", "投稿を開始しました。", stamp)
             item["status"] = "posting"
             return item
+
+    def has_due_post(self,stamp,slot=None):
+        with self.connect() as c:
+            if c.execute("SELECT 1 FROM posts WHERE status='scheduled' AND due<=? LIMIT 1",(stamp,)).fetchone():
+                return True
+            if not slot or c.execute("SELECT 1 FROM slots WHERE key=?",(slot,)).fetchone():
+                return False
+            day=slot.split('T',1)[0]
+            return bool(c.execute("""SELECT 1 FROM posts p LEFT JOIN recurring_overrides o ON o.post_id=p.id
+                WHERE p.status='queued' AND (o.post_id IS NULL OR o.day=?) LIMIT 1""",(day,)).fetchone())
 
     def checkpoint(self, post_id, key=None, submitted=False):
         with self.connect() as c:
@@ -398,6 +496,10 @@ class Store(RemoteStore):
 
     def capture_native(self, post_id, template, snapshot, edit_state=None):
         from .secrets import protect
+        previous=edit_state or {}
+        automatic_import=previous.get('_catalog_import',False)
+        if automatic_import and previous['tags']:
+            template={**template,'payload':{**template['payload'],'hashtags':['#'+tag for tag in previous['tags']]}}
         protected=protect(template)
         payload=template['payload']
         tags=tags_from_text(' '.join(payload.get('hashtags',[])))
@@ -408,7 +510,6 @@ class Store(RemoteStore):
                  'magazines':len(payload.get('magazine_ids',[]))+len(payload.get('magazine_keys',[])),
                  'publish_at':payload.get('publish_at'),'notifications':payload.get('send_notifications_flag',True)}
         stamp=now_ts()
-        previous=edit_state or {}
         status=previous.get('_previous_status','draft')
         due=previous.get('_previous_due') if status in {'scheduled','review'} else None
         message=''
@@ -416,9 +517,14 @@ class Store(RemoteStore):
             if due<=stamp:
                 status='overdue'
                 message='編集中に投稿時刻を過ぎました。再予約してください。'
-        elif status not in {'queued','review'}:
+        elif status not in {'queued','review','published','native_private'}:
             status,due='draft',None
         with self.connect() as c:
+            if automatic_import:
+                c.execute('BEGIN IMMEDIATE')
+                current=c.execute('SELECT updated,draft_key FROM posts WHERE id=?',(post_id,)).fetchone()
+                if current is None or current['updated']!=previous['updated'] or current['draft_key']!=previous['draft_key']:
+                    raise ValueError('取り込み中に記事の設定が変更されました。変更内容を保持しました。')
             c.execute("""UPDATE posts SET editor_kind='native',native_ready=1,native_html=?,native_document=?,native_fingerprint=?,
                   native_payload=?,native_owner=?,native_summary=?,title=?,body=?,tags=?,image='',status=?,due=?,error=?,updated=? WHERE id=?""",
                 (html,json.dumps(snapshot['document'],ensure_ascii=False),snapshot['fingerprint'],protected,owner,json.dumps(summary,ensure_ascii=False),
@@ -440,6 +546,13 @@ class Store(RemoteStore):
         with self.connect() as c:
             c.execute("UPDATE posts SET status='draft',native_ready=0,error=?,updated=? WHERE id=?",(message,now_ts(),post_id))
             self.event(c,post_id,'draft',message,now_ts())
+
+    def restore_interrupted_publish_check(self,post):
+        with self.connect() as c:
+            c.execute("""UPDATE posts SET status=?,due=?,native_ready=?,editor_kind=?,error=?,submitted=?,updated=?
+                WHERE id=? AND status='editing' AND draft_key=?""",
+                (post['status'],post['due'],post['native_ready'],post['editor_kind'],post['error'],
+                 post['submitted'],now_ts(),post['id'],post['draft_key']))
 
     def history(self, post_id):
         with self.connect() as c:

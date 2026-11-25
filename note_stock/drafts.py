@@ -155,4 +155,6 @@ def read_catalog(adapter):
     finally:
         page.remove_listener('response',receive)
         if not page.is_closed():
+            if len(page.context.pages)==1:
+                page.context.new_page()
             page.close()

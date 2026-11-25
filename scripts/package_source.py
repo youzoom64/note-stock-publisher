@@ -12,10 +12,15 @@ sys.path.insert(0,str(ROOT))
 from note_stock import __version__
 entries=[ROOT/name for name in ('main.py','requirements.txt','setup.ps1','start.cmd','README.md','VALIDATION.md','THIRD_PARTY_NOTICES.md')]
 entries.extend(path for path in (ROOT/'note_stock').rglob('*.py') if '__pycache__' not in path.parts)
+entries.append(ROOT/'note_stock'/'discord-manual-setup.html')
+entries.extend(sorted((ROOT/'note_stock'/'calendar_data').glob('*.*')))
+entries.extend(sorted((ROOT/'note_stock'/'sounds').glob('*.wav')))
 entries.append(ROOT/'scripts'/'package_source.py')
 activity_assets=tuple(ROOT/'extensions/remote_relogin/plugin/web'/name for name in ('index.html','style.css','app.js'))
 entries.extend(activity_assets)
 for path in entries:
+    if path.suffix == '.wav':
+        continue
     content=path.read_text(encoding='utf-8-sig')
     if path.suffix=='.py':
         ast.parse(content,filename=str(path))

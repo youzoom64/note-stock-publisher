@@ -7,6 +7,7 @@ import asyncio
 import json
 import uuid
 import discord
+from .loading_indicator import loading_text
 
 
 def authorized(store,user,guild,channel):
@@ -18,12 +19,6 @@ def authorized(store,user,guild,channel):
 def flow(client):
     if not hasattr(client,'ui'): client.ui=DiscordUI(client)
     return client.ui
-
-
-def processing_frame(content,step):
-    heading,separator,body=content.partition('\n')
-    action=heading.removeprefix('処理中: ')
-    return action+'.'*(step%3+1)+(separator+body if separator else '')
 
 
 class DiscordUI:
@@ -57,17 +52,20 @@ class DiscordUI:
         check=getattr(i.response,'is_done',None)
         return bool(check()) if check else False
 
-    async def defer(self,i,*,thinking=False):
+    async def defer(self,i,*,thinking=False,show_loading=True):
         if not hasattr(i,'extras'): i.extras={}
         i.extras['note_thinking']=thinking
         if not self.responded(i): await i.response.defer(ephemeral=True,thinking=thinking)
         i.extras['note_deferred']=True
+        if show_loading and self.valid(i):
+            await i.edit_original_response(content=loading_text(self.client),
+                                           view=None,embeds=[],attachments=[])
 
     async def obsolete(self,i):
         # A modal may refer to the SAME message now containing a newer menu.
         # Never delete/edit that source, and never append a stale-input notice.
         if not self.responded(i):
-            await self.defer(i,thinking=getattr(i,'message',None) is None)
+            await self.defer(i,thinking=getattr(i,'message',None) is None,show_loading=False)
         if getattr(i,'extras',{}).get('note_thinking'):
             delete=getattr(i,'delete_original_response',None)
             if delete:
@@ -123,30 +121,6 @@ class DiscordUI:
         self.screen_message=message
         if not hasattr(self.client,'operation_views'): self.client.operation_views=set()
         self.client.operation_views.add(view)
-
-    def animate_processing(self,jid,message,content,interval=0.5):
-        generation=self.current();mid=str(message.id)
-        def active():
-            return (self.current()==generation and str(self.state().get('message_id'))==mid
-                    and self.store.job(jid)['state'] in {'waiting','running'})
-        async def animate():
-            step=1
-            try:
-                while active():
-                    await asyncio.sleep(interval)
-                    async with self.lock:
-                        if not active():return
-                        await message.edit(content=processing_frame(content,step),allowed_mentions=discord.AllowedMentions.none())
-                        step+=1
-            except discord.HTTPException:
-                # A decoration cannot change the job's result or append errors.
-                return
-        if not active():return None
-        task=asyncio.create_task(animate());self.animations[jid]=task
-        def finished(done):
-            if self.animations.get(jid) is done:self.animations.pop(jid,None)
-        task.add_done_callback(finished)
-        return task
 
     async def close(self):
         tasks=list(self.animations.values())
@@ -244,7 +218,9 @@ class DiscordUI:
         """Reservation entry points share launch, ownership and control retirement."""
         from .schedule_activity import service
         async with self.lock:
-            if not self.valid(i):return await self.obsolete(i)
+            if not self.valid(i):
+                await self.obsolete(i)
+                return True
             api=service(self.store);lid=None
             try:
                 lid=api.prepare(pid,i.user.id,self.current())
@@ -254,18 +230,21 @@ class DiscordUI:
             except Exception as exc:
                 if lid:
                     with self.store.connect() as c:c.execute("UPDATE activity_reservations SET state='cancelled' WHERE id=?",(lid,))
+                if not self.responded(i):
+                    return False
                 self.store.notification(False,str(exc) if isinstance(exc,ValueError) else '予約画面を開けませんでした。Discord接続を確認してください。',key='activity-launch:'+str(i.id))
-                if not self.responded(i):await self.defer(i)
-                return
+                return True
             state=self.state();state['phase']='activity';self.store.set_setting('discord_ui_state',state)
             for mid in state.get('message_ids',[state.get('message_id')]):
                 if mid:await self.client.disable_menu(mid)
+            return True
 
     async def progress(self,i,text):
         from .discord_bot import GuardView
         view=GuardView(self.client,timeout=None)
         if not self.responded(i): await self.defer(i,thinking=getattr(i,'message',None) is None)
-        return await self.render(i,'deferred',text,view,allowed_mentions=discord.AllowedMentions.none())
+        return await self.render(i,'deferred',loading_text(self.client,text),view,
+                                 allowed_mentions=discord.AllowedMentions.none())
 
     async def finish(self,i,message,ok=False):
         if not self.valid(i): return await self.obsolete(i)

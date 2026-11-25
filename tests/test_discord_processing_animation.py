@@ -1,39 +1,43 @@
 import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
-from note_stock.store import Store
-from note_stock.discord_bot import NoteClient,GuardView,Menu
-from note_stock.discord_flow import flow,processing_frame
+from note_stock.discord_flow import flow
+from note_stock.loading_indicator import body_loading_text, loading_text
+from test_discord_flow import setup, interaction
 
+EMOJI = "<a:note_loading:123456789012345678>"
 
-def test_animation_cycles_dots_and_stops_when_the_job_finishes(tmp_path):
+def test_all_progress_uses_inline_application_emoji(tmp_path):
     async def run():
-        store=Store(tmp_path);client=NoteClient(store);ui=flow(client)
-        jid=store.enqueue('sync_articles');frames=[]
-        async def edit(**kwargs):
-            frames.append(kwargs['content'])
-            if len(frames)==3:store.complete_job(jid,True,'同期完了')
-        message=SimpleNamespace(id=99,edit=AsyncMock(side_effect=edit))
-        ui.install(GuardView(client),message)
-        content='処理中: note同期\n受付番号: test'
-        task=ui.animate_processing(jid,message,content,interval=0.001)
-        await asyncio.wait_for(task,timeout=1)
-        assert [frame.split('\n')[0] for frame in frames]==['note同期..','note同期...','note同期.']
-        assert all(frame.endswith('受付番号: test') for frame in frames)
-        assert len(store.pending_notifications())==1
+        store,client,pid=setup(tmp_path)
+        client.loading_emoji=EMOJI
+        ui=flow(client)
+        for text in ("処理中: 投稿・更新", "note同期", "再ログインの待機を中止しています…"):
+            i=interaction()
+            await ui.progress(i,text)
+            assert i.edit_original_response.call_args.kwargs["content"]==EMOJI+" "+text
+        assert body_loading_text(client)==EMOJI+" 本文取得中"
+        assert loading_text(client,EMOJI+" 処理中")==EMOJI+" 処理中"
         await client.close()
     asyncio.run(run())
 
-
-def test_new_screen_cancels_animation_before_it_can_edit_the_menu(tmp_path):
+def test_deferred_wait_uses_emoji_for_commands_and_buttons(tmp_path):
     async def run():
-        store=Store(tmp_path);client=NoteClient(store);ui=flow(client)
-        jid=store.enqueue('sync_articles');message=SimpleNamespace(id=99,edit=AsyncMock())
-        ui.install(GuardView(client),message)
-        task=ui.animate_processing(jid,message,'処理中: note同期',interval=0.01)
-        ui.install(Menu(client),message)
-        await asyncio.gather(task,return_exceptions=True)
-        message.edit.assert_not_awaited()
-        assert store.job(jid)['state']=='waiting' and not store.pending_notifications()
+        store,client,pid=setup(tmp_path)
+        client.loading_emoji=EMOJI
+        for mid in (None,99):
+            i=interaction(mid)
+            await flow(client).defer(i,thinking=mid is None)
+            assert i.edit_original_response.call_args.kwargs["content"]==EMOJI+" 処理中"
+        await client.close()
+    asyncio.run(run())
+
+def test_stale_input_does_not_replace_current_screen_with_loading(tmp_path):
+    async def run():
+        store,client,pid=setup(tmp_path)
+        i=interaction()
+        i.extras["note_expected_ui"]="stale"
+        await flow(client).obsolete(i)
+        i.edit_original_response.assert_not_awaited()
         await client.close()
     asyncio.run(run())

@@ -9,6 +9,38 @@ from note_stock.discord_flow import flow
 from note_stock.discord_bot import NoteClient,Menu,Articles,ArticleView,Confirm,authorized
 
 
+def test_automatic_article_sync_uses_default_and_saved_interval(tmp_path,monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    from note_stock import remote
+    from note_stock.commands import Commands
+
+    store=Store(tmp_path)
+    store.set_setting('account_verified',True)
+    enqueue=Mock(wraps=store.enqueue)
+    monkeypatch.setattr(store,'enqueue',enqueue)
+    monkeypatch.setattr(store,'next_job',lambda **_:None)
+    window=SimpleNamespace(quitting=False,dirty=False,busy=lambda:False)
+    controller=SimpleNamespace(window=window,store=store,current=None,last_sync=0)
+    clock=Mock(return_value=3599)
+    monkeypatch.setattr(remote,'now_ts',clock)
+    remote.RemoteController.tick(controller)
+    enqueue.assert_not_called()
+    clock.return_value=3600
+    remote.RemoteController.tick(controller)
+    enqueue.assert_called_once_with('sync_articles',request_key='sync:interval:3600')
+    commands=Commands(store)
+    assert not commands.handle({'command':'settings','data':{'article_sync_minutes':0}})['ok']
+    saved=commands.handle({'command':'settings','data':{'article_sync_minutes':15}})
+    assert saved['ok'] and saved['result']['article_sync_minutes']==15
+    clock.return_value=4499
+    remote.RemoteController.tick(controller)
+    assert enqueue.call_count==1
+    clock.return_value=4500
+    remote.RemoteController.tick(controller)
+    assert enqueue.call_count==2 and controller.last_sync==4500
+
+
 @pytest.fixture(autouse=True)
 def no_live_message_edits_in_unit_tests(monkeypatch):
     import discord.http
@@ -39,7 +71,7 @@ def test_unread_article_disables_actions_and_never_claims_free_price(tmp_path):
         pid=store.create({'title':'a','body':'b'})
         view=ArticleView(client,store.get(pid))
         assert view.publish.disabled and view.schedule.disabled and view.tags.disabled
-        assert not view.back.disabled and not view.refresh_article.disabled
+        assert not view.back.disabled and view.refresh_article.disabled
         assert view.refresh_article.label=='本文・公開条件を読み込む'
         assert '価格: 未確認' in article_text(store,store.get(pid))
         assert '価格: 0円' not in article_text(store,store.get(pid))
@@ -339,7 +371,7 @@ def test_article_back_preserves_search_page_and_does_not_change_article_or_queue
         interaction=ui_interaction()
         await article_buttons(row)[0].callback(interaction)
         detail=interaction.response.edit_message.call_args.kwargs['view']
-        assert isinstance(detail,ArticleView) and detail.listing==('all',1,'対象 ',30)
+        assert isinstance(detail,ArticleView) and detail.listing==('all',1,'対象 ')
         assert listing.is_finished()
         interaction.response.edit_message.reset_mock()
         await detail.back.callback(interaction)
@@ -538,6 +570,7 @@ def test_renamed_slash_commands_use_guards_and_publication_confirmation(tmp_path
         i=ui_interaction(message=None)
         await client.tree.get_command('投稿する').callback(i,pid)
         assert isinstance(i.response.send_message.call_args.kwargs['view'],ArticleView)
+        store.checkpoint(pid,key='n123456789abc')
         with store.connect() as c: c.execute('UPDATE posts SET native_ready=1 WHERE id=?',(pid,))
         i=ui_interaction(2,message=None)
         await client.tree.get_command('投稿する').callback(i,pid)

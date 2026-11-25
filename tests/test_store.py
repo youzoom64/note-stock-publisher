@@ -1,5 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -28,6 +28,20 @@ def test_roundtrip_duplicate_and_reorder(store):
     assert reopened.get(b)['tags'] == ['日記', '旅行']
     assert reopened.get(b)['status'] == 'draft'
     assert reopened.get(b)['draft_key'] == ''
+
+
+def test_article_preview_preserves_schedule_and_is_invalidated_on_key_change(store):
+    pid = post(store, status='scheduled', due=500)
+    store.checkpoint(pid, key='n0123456789ab')
+    before = store.get(pid)
+    store.save_article_preview(pid, before['draft_key'], '読み込んだ本文', '<p>読み込んだ本文</p>')
+    reopened = Store(store.root)
+    assert reopened.get(pid) == before
+    assert reopened.article_preview(pid)['body'] == '読み込んだ本文'
+    reopened.checkpoint(pid, key='n123456789abc')
+    assert reopened.article_preview(pid) is None
+    with pytest.raises(ValueError):
+        reopened.save_article_preview(pid, before['draft_key'], '古い本文', '')
 
 
 def test_tags_normalized_and_deduplicated():
@@ -74,6 +88,26 @@ def test_expired_startup_no_burst(store):
     assert store.claim(201) is None
 
 
+def test_normal_startup_resumes_verified_account_after_expiring_old_reservations(store):
+    store.set_setting('paused',True)
+    store.set_setting('account','tester')
+    store.set_setting('account_verified',True)
+    pid=post(store,'scheduled',150)
+    reopened=Store(store.root)
+    assert pid in reopened.recover(200,start_automatic_posting=True)
+    assert reopened.setting('paused') is False
+    assert reopened.get(pid)['status']=='overdue'
+    assert Scheduler(reopened,200).tick(201) is None
+
+
+def test_startup_waits_for_first_account_verification_and_non_gui_recovery_keeps_pause(store):
+    store.recover(200,start_automatic_posting=True)
+    assert store.setting('paused') is True
+    store.set_setting('account_verified',True)
+    store.recover(201)
+    assert store.setting('paused') is True
+
+
 def ready(store):
     store.set_setting('account', 'tester')
     store.set_setting('paused', False)
@@ -89,6 +123,39 @@ def test_recurring_once_per_slot_and_empty_slot(store):
     store.finish(a, 'published', url='https://note.com/tester/n/n123456789abc')
     assert scheduler.tick(t+1) is None
     assert store.get(b)['status'] == 'queued'
+
+
+def test_recurring_override_moves_each_queued_post_one_daily_slot_later(store):
+    ready(store)
+    monday=datetime(2026,11,23,9,0,tzinfo=JST)
+    a,b,priority=post(store),post(store),post(store)
+    store.set_recurring_override(priority,'2026-11-23',stamp=monday.timestamp()-60)
+    reopened=Store(store.root)
+    assert reopened.recurring_override(priority)=='2026-11-23'
+    for index,pid in enumerate((priority,a,b)):
+        stamp=(monday+timedelta(days=index)).timestamp()
+        scheduler=Scheduler(reopened,stamp-1)
+        assert scheduler.tick(stamp)['id']==pid
+        reopened.finish(pid,'published')
+        assert scheduler.tick(stamp+1) is None
+    assert reopened.recurring_override(priority) is None
+
+
+def test_recurring_override_waits_for_its_day_and_rejects_duplicate_or_non_recurring_day(store):
+    ready(store)
+    store.set_setting('recurrence',{'days':[0,2],'time':'09:00'})
+    monday=datetime(2026,11,23,9,0,tzinfo=JST).timestamp()
+    priority,first=post(store),post(store)
+    with pytest.raises(ValueError,match='定期投稿の日'):
+        store.set_recurring_override(priority,'2026-11-24',stamp=monday-60)
+    store.set_recurring_override(priority,'2026-11-25',stamp=monday-60)
+    with pytest.raises(ValueError,match='別の記事'):
+        store.set_recurring_override(first,'2026-11-25',stamp=monday-60)
+    assert Scheduler(store,monday-1).tick(monday)['id']==first
+    store.finish(first,'published')
+    store.set_recurring_override(priority,None)
+    stamp=datetime(2026,11,25,9,0,tzinfo=JST).timestamp()
+    assert Scheduler(store,stamp-1).tick(stamp)['id']==priority
 
 
 def test_busy_slot_and_explicit_due_wait_instead_of_expiring(store):

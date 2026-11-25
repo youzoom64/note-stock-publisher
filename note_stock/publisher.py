@@ -112,7 +112,7 @@ class NoteBrowser:
             self.page.goto(login_url, wait_until='domcontentloaded', timeout=20000)
         except BrowserTimeout as exc:
             raise VerificationFailed('noteのログインページを20秒以内に読み込めませんでした。ブラウザーで表示を確認してください。') from exc
-        self.progress("専用ブラウザーでnoteにログインしてください。接続確認は最大15分待ちます。")
+        getattr(self,'action_required',self.progress)("専用ブラウザーでnoteにログインしてください。接続確認は最大15分待ちます。")
         deadline = time.monotonic() + 900
         while time.monotonic() < deadline:
             if self.cancelled():
@@ -121,6 +121,7 @@ class NoteBrowser:
             section = location.path.strip('/').split('/',1)[0]
             if (location.scheme == 'https' and location.hostname == 'note.com' and
                     section not in {'login','signup','auth','oauth'}):
+                self.progress("noteのログイン先を確認しています。")
                 actual = self.identity()
                 break
             self.page.wait_for_timeout(500)

@@ -49,6 +49,8 @@ def test_open_reuses_blank_without_overwriting_existing_editor(tmp_path,monkeypa
     adapter.open(None)
     assert adapter.page is blank
     context.new_page.assert_not_called()
+    assert adapter.new_page() is blank
+    context.new_page.assert_not_called()
 
 
 def test_headless_operation_login_failure_does_not_replay_write(monkeypatch):
@@ -57,7 +59,10 @@ def test_headless_operation_login_failure_does_not_replay_write(monkeypatch):
         'account': 'tester', 'headless_note_session': 'protected',
     }.get(key, default))
     context = SimpleNamespace(new_page=Mock(return_value='page'), set_default_timeout=Mock())
-    browser = SimpleNamespace(new_context=Mock(return_value=nullcontext(context)))
+    version_session=Mock()
+    version_session.send.return_value={'userAgent':'Mozilla/5.0 HeadlessChrome/144.0.0.0 Safari/537.36'}
+    browser = SimpleNamespace(new_context=Mock(return_value=nullcontext(context)),
+                              new_browser_cdp_session=Mock(return_value=version_session))
     launch = Mock(return_value=nullcontext(browser))
     playwright = SimpleNamespace(chromium=SimpleNamespace(launch=launch))
     adapter = SimpleNamespace(store=store, check_account=Mock())
@@ -73,5 +78,7 @@ def test_headless_operation_login_failure_does_not_replay_write(monkeypatch):
             raise LoginRequired('送信時にログイン切れ')
     launch.assert_called_once_with(executable_path='browser', headless=True)
     browser.new_context.assert_called_once()
+    assert browser.new_context.call_args.kwargs['user_agent']=='Mozilla/5.0 Chrome/144.0.0.0 Safari/537.36'
+    version_session.detach.assert_called_once()
     adapter.check_account.assert_called_once()
     visible.assert_not_called()

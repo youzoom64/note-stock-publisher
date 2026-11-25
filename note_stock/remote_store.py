@@ -22,6 +22,8 @@ class RemoteStore:
                     account TEXT NOT NULL, note_key TEXT NOT NULL, post_id TEXT NOT NULL,
                     remote_status TEXT NOT NULL, remote_updated TEXT NOT NULL DEFAULT '',
                     seen REAL NOT NULL, PRIMARY KEY(account,note_key));
+                CREATE TABLE IF NOT EXISTS catalog_imports(
+                    post_id TEXT PRIMARY KEY, attempted_seen REAL NOT NULL, imported_revision TEXT);
                 CREATE TABLE IF NOT EXISTS incoming_drafts(request_key TEXT PRIMARY KEY,post_id TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS notification_messages(
                     notification_id TEXT PRIMARY KEY,result_id TEXT NOT NULL DEFAULT '',menu_id TEXT NOT NULL DEFAULT '');
@@ -94,14 +96,21 @@ class RemoteStore:
             result[key]=json.loads(result[key])
         return result
 
-    def next_job(self,browser_allowed=True):
+    def preview_job_state(self,post_id):
+        with self.connect() as c:
+            row=c.execute("""SELECT state FROM jobs WHERE action='preview_article' AND post_id=?
+                             AND state IN ('waiting','running') ORDER BY created LIMIT 1""",(post_id,)).fetchone()
+        return row['state'] if row else None
+
+    def next_job(self,browser_allowed=True,*,editing_locally=False):
         with self.connect() as c:
             c.execute('BEGIN IMMEDIATE')
             if c.execute("SELECT 1 FROM jobs WHERE state='running'").fetchone():
                 return None
-            row=c.execute("SELECT id FROM jobs WHERE state='waiting' "+
-                          ("" if browser_allowed else "AND action IN ('pause','resume','cancel_schedule','relogin_note') ")+
-                          "ORDER BY created LIMIT 1").fetchone()
+            allowed=("AND (action IN ('schedule','publish_note','tags') OR request_key LIKE 'publish-preflight:%' OR (action='refresh_article' AND json_extract(data,'$.selection_read')=1)) " if editing_locally else
+                     "" if browser_allowed else "AND (action IN ('pause','resume','cancel_schedule','relogin_note',"
+                     "'schedule','publish_note','tags') OR request_key LIKE 'publish-preflight:%') ")
+            row=c.execute("SELECT id FROM jobs WHERE state='waiting' "+allowed+"ORDER BY created LIMIT 1").fetchone()
             if not row:
                 return None
             c.execute("UPDATE jobs SET state='running',updated=? WHERE id=?",(timestamp(),row['id']))
@@ -112,15 +121,43 @@ class RemoteStore:
         with self.connect() as c:
             c.execute('UPDATE jobs SET state=?,result=?,updated=? WHERE id=?',
                       ('done' if ok else 'failed',json.dumps(result,ensure_ascii=False),timestamp(),jid))
-            if notify and not c.execute("SELECT 1 FROM jobs WHERE id=? AND request_key LIKE 'reservation-preflight:%'",(jid,)).fetchone():
+            local_only=notify and c.execute("""SELECT 1 FROM jobs WHERE id=? AND
+                (request_key LIKE 'reservation-preflight:%' OR request_key LIKE 'publish-preflight:%'
+                 OR action='preview_article')""",(jid,)).fetchone()
+            if notify and not local_only:
                 c.execute('INSERT OR IGNORE INTO notifications(id,body) VALUES(?,?)',
                           ('job:'+jid,json.dumps(result,ensure_ascii=False)))
 
     def recover_jobs(self):
         with self.connect() as c:
             ids=[row[0] for row in c.execute("SELECT id FROM jobs WHERE state='running'")]
+            stale=[row[0] for row in c.execute("""SELECT id FROM jobs WHERE state='waiting'
+                AND (request_key LIKE 'reservation-preflight:%' OR request_key LIKE 'publish-preflight:%')""")]
         for jid in ids:
             self.complete_job(jid,False,'前回の処理が中断されました。note上の結果を確認してください。自動再送はしません。')
+        for jid in stale:
+            self.complete_job(jid,False,'前回の公開条件の確認は中断されました。',notify=False)
+
+    def cancel_publish_check(self,jid):
+        result=json.dumps({'ok':False,'message':'公開条件の確認を中止しました。','url':''},ensure_ascii=False)
+        with self.connect() as c:
+            c.execute("""UPDATE jobs SET state='failed',result=?,updated=? WHERE id=?
+                AND state='waiting' AND request_key LIKE 'publish-preflight:%'""",(result,timestamp(),jid))
+
+    def expire_waiting_reservations(self,stamp=None):
+        stamp=timestamp() if stamp is None else stamp
+        with self.connect() as c:
+            c.execute('BEGIN IMMEDIATE')
+            rows=c.execute("""SELECT id,data FROM jobs WHERE action='schedule' AND state='waiting'
+                AND (created<=? OR json_extract(data,'$.due')<=?)""",(stamp-120,stamp)).fetchall()
+            for row in rows:
+                due=json.loads(row['data']).get('due')
+                message=('予約を処理する前に指定日時を過ぎました。日時を選び直してください。'
+                         if type(due) in (int,float) and due<=stamp else
+                         'PCが予約処理を開始できませんでした。PC側の編集中の画面や接続状態を確認してください。')
+                result=json.dumps({'ok':False,'message':message,'url':''},ensure_ascii=False)
+                c.execute("UPDATE jobs SET state='failed',result=?,updated=? WHERE id=?",(result,stamp,row['id']))
+                c.execute('INSERT OR IGNORE INTO notifications(id,body) VALUES(?,?)',('job:'+row['id'],result))
 
     def pending_notifications(self):
         with self.connect() as c:
@@ -225,6 +262,31 @@ class RemoteStore:
         with self.connect() as c:
             row=c.execute('SELECT * FROM catalog WHERE post_id=? AND account=?',(pid,self.setting('account',''))).fetchone()
         return dict(row) if row else {}
+
+    def next_catalog_import(self,selected=None):
+        account=self.setting('account','')
+        if not account:
+            return None
+        with self.connect() as c:
+            c.execute('BEGIN IMMEDIATE')
+            row=c.execute("""SELECT p.*,c.seen AS catalog_seen,c.remote_updated AS catalog_revision
+                FROM catalog c JOIN posts p ON p.id=c.post_id AND p.draft_key=c.note_key
+                LEFT JOIN catalog_imports i ON i.post_id=p.id
+                WHERE c.account=? AND c.remote_status IN ('draft','published','private','frozen')
+                AND p.status IN ('draft','published','native_private','queued','scheduled','review')
+                AND (p.native_ready=0 OR (i.imported_revision IS NOT NULL AND i.imported_revision<>c.remote_updated))
+                AND (i.attempted_seen IS NULL OR i.attempted_seen<>c.seen)
+                ORDER BY CASE WHEN p.id=? THEN 0 ELSE 1 END,c.seen DESC,p.position LIMIT 1""",(account,selected)).fetchone()
+            if row is None:
+                return None
+            c.execute("""INSERT INTO catalog_imports(post_id,attempted_seen) VALUES(?,?)
+                ON CONFLICT(post_id) DO UPDATE SET attempted_seen=excluded.attempted_seen""",(row['id'],row['catalog_seen']))
+        return self.decode(row)
+
+    def finish_catalog_import(self,post):
+        with self.connect() as c:
+            c.execute("""UPDATE catalog_imports SET imported_revision=? WHERE post_id=? AND attempted_seen=?""",
+                      (post['catalog_revision'],post['id'],post['catalog_seen']))
 
     def set_schedule(self,pid,due):
         import math

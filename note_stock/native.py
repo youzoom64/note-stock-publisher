@@ -50,6 +50,10 @@ class NativeNoteBrowser(NoteBrowser):
             self.page=self.new_page()
 
     def new_page(self):
+        from .managed_browser import startup_blank_page
+        blank=startup_blank_page(self.context)
+        if blank is not None:
+            return blank
         if getattr(self,'background',False):
             from .managed_browser import background_page
             return background_page(self.browser,self.context)
@@ -59,6 +63,17 @@ class NativeNoteBrowser(NoteBrowser):
         # The with sync_playwright() owner disconnects its driver. The app-owned
         # Chromium keeps its profile and the user's native editing tabs alive.
         pass
+
+    def read_article_preview(self,post):
+        try:
+            key=post['draft_key']
+            self.page.goto(self.EDITOR+f'/notes/{key}/edit/',wait_until='domcontentloaded')
+            _,body=self.editor_fields()
+            if self.draft_key(self.page.url)!=key:
+                raise VerificationFailed('選んだ記事の本文を確認できませんでした。')
+            self.store.save_article_preview(post['id'],key,plain_text(body),body.inner_html())
+        finally:
+            self.page.close()
 
     def drafts(self):
         from .drafts import read_drafts
@@ -234,7 +249,11 @@ class NativeNoteBrowser(NoteBrowser):
             finally:
                 session.detach()
             self.page.bring_to_front()
-        key=self.wait_draft(post['id'])
+        if post.get('_catalog_import'):
+            if self.draft_key(self.page.url)!=key:
+                raise VerificationFailed('取り込み対象の記事を確認できませんでした。')
+        else:
+            key=self.wait_draft(post['id'])
         in_editor='/edit' in urlparse(self.page.url).path
         title,body=self.editor_fields() if in_editor else (None,None)
         if not post['draft_key']:
@@ -256,7 +275,8 @@ class NativeNoteBrowser(NoteBrowser):
         self.page.evaluate("""()=>{const prefix='【ストック編集・公開しません】';
             const update=()=>{if(!document.title.startsWith(prefix))document.title=prefix+document.title;};
             update();new MutationObserver(update).observe(document.querySelector('title')||document.head,{childList:true,subtree:true});}""")
-        self.progress('note本来の編集画面で編集してください。公開設定と有料エリアなどを設定し、最後の投稿操作でアプリへ取り込みます。まだ公開しません。')
+        if not automatic:
+            getattr(self,'action_required',self.progress)('note本来の編集画面で編集してください。公開設定の最後の投稿操作で本文を取り込みます。')
         keep_open=False
         try:
             if automatic:
@@ -297,6 +317,8 @@ class NativeNoteBrowser(NoteBrowser):
                 if self.page.is_closed():
                     raise RuntimeError('取り込み前に編集画面が閉じられました。note側の下書きから編集を再開できます。')
                 self.page.wait_for_timeout(200)
+            if not automatic:
+                self.progress('noteから本文と公開設定を取り込んでいます。')
             # Final native payload already contains the complete free/pay HTML and
             # every chosen publication option. Never turn either body into plain text.
             inspector=self.new_page()

@@ -131,17 +131,20 @@ def test_discord_reservation_calendar_without_relay_queues_after_confirmation(tm
         assert isinstance(view,ReservationCalendar)
         if view.month!=selected.month:
             changed=interaction()
+            changed.message=opened.message
             await view.following.callback(changed)
             view=changed.response.edit_message.call_args.kwargs['view']
-        select=next(item for item in view.children if any(option.value==str(selected.day) for option in getattr(item,'options',[])))
-        select._values=[str(selected.day)]
+        days=view.parts[0]
+        day=next(item for row in days.children for item in row.children if item.label.startswith(f'{selected.day}日 '))
         pick=interaction()
-        await select.callback(pick)
+        pick.message=days.message
+        await day.callback(pick)
         modal=pick.response.send_modal.call_args.args[0]
         modal.clock._value='09:30'
         entered=interaction()
+        entered.message=days.message
         await modal.on_submit(entered)
-        confirmation=entered.response.edit_message.call_args.kwargs['view']
+        confirmation=opened.message.edit.call_args.kwargs['view']
         assert store.next_job() is None
         await confirmation.yes.callback(interaction())
         job=store.next_job()
@@ -152,37 +155,24 @@ def test_discord_reservation_calendar_without_relay_queues_after_confirmation(tm
     asyncio.run(run())
 
 
-@pytest.mark.parametrize('ok',[True,False])
-def test_schedule_button_reads_unchecked_draft_before_opening_calendar(tmp_path,ok):
+@pytest.mark.parametrize('activity_configured',[True,False])
+def test_schedule_button_opens_calendar_without_reading_unchecked_draft(tmp_path,activity_configured):
     from note_stock.discord_bot import ArticleView, ReservationCalendar
 
     async def run():
         store,client,pid=setup(tmp_path)
         configure(store,pid)
-        store.set_setting('remote_relogin',{})
+        store.set_setting('remote_relogin',{'schedule_verified':activity_configured})
         with store.connect() as connection:
             connection.execute('UPDATE posts SET native_ready=0 WHERE id=?',(pid,))
         article=ArticleView(client,store.get(pid))
         assert not article.schedule.disabled
         click=interaction()
         flow(client).install(article,click.message)
-        reading=asyncio.create_task(article.schedule.callback(click))
-        for _ in range(50):
-            job=store.next_job()
-            if job:
-                break
-            await asyncio.sleep(0.02)
-        assert job['action']=='refresh_article'
-        if ok:
-            with store.connect() as connection:
-                connection.execute('UPDATE posts SET native_ready=1 WHERE id=?',(pid,))
-        store.complete_job(job['id'],ok,'noteから読み込めませんでした' if not ok else '読み込み済み')
-        await asyncio.wait_for(reading,timeout=3)
-        result=click.edit_original_response.call_args.kwargs
-        if ok:
-            assert isinstance(result['view'],ReservationCalendar)
-        else:
-            assert isinstance(result['view'],ArticleView) and 'noteから読み込めませんでした' in result['content']
+        await article.schedule.callback(click)
+        result=click.response.edit_message.call_args.kwargs
+        assert isinstance(result['view'],ReservationCalendar)
+        assert not store.get(pid)['native_ready']
         assert store.next_job() is None and not store.pending_notifications()
         await client.close()
 

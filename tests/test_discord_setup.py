@@ -10,6 +10,8 @@ def test_owner_authentication_pending_is_reported_without_collecting_password(tm
     worker=PortalSetup(store)
     notices=[]
     worker.progress.connect(notices.append)
+    prompts=[]
+    worker.action_required.connect(prompts.append)
     class Visible:
         first=None
         def __init__(self): self.first=self
@@ -24,6 +26,8 @@ def test_owner_authentication_pending_is_reported_without_collecting_password(tm
         worker.until(lambda:False,'接続を準備しています。')
     assert store.setting('discord_setup')['authentication_pending'] is True
     assert any('一致しません' in notice for notice in notices)
+    assert any('一致しません' in prompt for prompt in prompts)
+    assert prompts[-1]==''
 
 
 def test_deleted_installed_bot_can_be_replaced_without_losing_server(tmp_path):
@@ -221,3 +225,24 @@ def test_owner_finishes_verification_on_another_device(tmp_path):
         assert store.setting('discord')['guild']==guild
         assert store.setting('discord_setup')['stage']=='installed'
         browser.close()
+
+
+def test_manual_verifies_installation_before_saving(tmp_path,monkeypatch):
+    from note_stock.discord_setup import ManualSetup,save_manual_setup
+    store=Store(tmp_path)
+    store.set_setting('discord_token','previous-encrypted')
+    application='123456789012345678'
+    guild='234567890123456789'
+    worker=ManualSetup(store,'dummy-token-for-testing-only',guild)
+    responses={'oauth2/applications/@me':{'id':application,'team':None},
+               'guilds/'+guild:{'id':guild}}
+    monkeypatch.setattr(worker,'discord_get',responses.__getitem__)
+    monkeypatch.setattr('note_stock.discord_setup.protect',lambda token:'new-encrypted')
+    expected=[]
+    worker.outcome.connect(lambda ok,message:expected.append(ok))
+    worker.run()
+    assert expected==[True] and store.setting('discord_token')=='previous-encrypted'
+    save_manual_setup(store,*worker.settings)
+    assert store.setting('discord_token')=='new-encrypted'
+    assert store.setting('discord')=={'application':application,'guild':guild}
+    assert store.setting('discord_onboarding')=={'enabled':True,'mode':'manual'}

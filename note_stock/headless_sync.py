@@ -53,8 +53,13 @@ def open_note_session(adapter, playwright):
     _, executable = select_browser(playwright, preference)
     login_error = None
     with playwright.chromium.launch(executable_path=executable, headless=True) as browser:
+        version_session=browser.new_browser_cdp_session()
+        try:
+            user_agent=version_session.send('Browser.getVersion')['userAgent'].replace('HeadlessChrome/','Chrome/')
+        finally:
+            version_session.detach()
         for state in states():
-            with browser.new_context(storage_state=state, locale='ja-JP', timezone_id='Asia/Tokyo') as context:
+            with browser.new_context(storage_state=state, locale='ja-JP', timezone_id='Asia/Tokyo',user_agent=user_agent) as context:
                 context.set_default_timeout(20000)
                 adapter.browser = browser
                 adapter.context = context

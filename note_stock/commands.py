@@ -8,7 +8,7 @@ from .publisher import account_id
 from .store import now_ts, tags_from_text
 
 COMMANDS = ('status','list','get','create','update','duplicate','delete','move','settings','pause','resume','login','edit','drafts','import','publish','verify','export',
-            'sync_articles','save_note_draft','refresh_article','schedule','cancel_schedule','delete_note','publish_note','tags','job','discord')
+            'sync_articles','save_note_draft','refresh_article','schedule','cancel_schedule','recurring_override','delete_note','publish_note','tags','job','discord')
 
 
 class Commands:
@@ -51,6 +51,15 @@ class Commands:
                 'guild':config.get('guild'),'channel':config.get('channel'),'accepted':action!='status'},'at':now_ts()}
         if command=='job':
             return {'ok':True,'result':self.store.job(pid),'at':now_ts()}
+        if command=='recurring_override':
+            if not pid:
+                raise ValueError('記事を指定してください。')
+            self.store.get(pid)
+            if 'day' in data:
+                if data['day'] is not None and not isinstance(data['day'],str):
+                    raise ValueError('差し込み日は YYYY-MM-DD で指定してください。')
+                self.store.set_recurring_override(pid,data['day'])
+            return {'ok':True,'result':{'day':self.store.recurring_override(pid)},'at':now_ts()}
         if 'due' in data:
             due=data['due']
             if isinstance(due,str):
@@ -113,11 +122,16 @@ class Commands:
             self.store.reorder(pid,direction)
             result = self.store.posts()
         elif command == 'settings':
-            allowed = {'account','favorite_tags','recurrence','diagnostics','browser','note_login_method'}
+            from .store import DEFAULT_ARTICLE_SYNC_MINUTES, MIN_ARTICLE_SYNC_MINUTES, MAX_ARTICLE_SYNC_MINUTES
+            allowed = {'account','favorite_tags','recurrence','diagnostics','browser','note_login_method','article_sync_minutes'}
             if set(data)-allowed:
                 raise ValueError('未対応の設定があります。')
             if 'note_login_method' in data and data['note_login_method'] not in ('google','password'):
                 raise ValueError('noteのログイン方法が正しくありません。')
+            if 'article_sync_minutes' in data:
+                minutes=data['article_sync_minutes']
+                if type(minutes) is not int or not MIN_ARTICLE_SYNC_MINUTES<=minutes<=MAX_ARTICLE_SYNC_MINUTES:
+                    raise ValueError('記事一覧の自動同期間隔は1〜1440分で指定してください。')
             if 'browser' in data:
                 from .managed_browser import CHOICES
                 if data['browser'] not in CHOICES:
@@ -146,6 +160,7 @@ class Commands:
             if any(results.values()):
                 raise ValueError('一部保存失敗: '+json.dumps(results,ensure_ascii=False))
             result={key:self.store.setting(key) for key in allowed}
+            result['article_sync_minutes']=self.store.setting('article_sync_minutes',DEFAULT_ARTICLE_SYNC_MINUTES)
         elif command in {'pause','resume'}:
             if command=='resume' and not self.store.setting('account_verified',False):
                 raise ValueError('先にログイン・接続確認を行ってください。')
