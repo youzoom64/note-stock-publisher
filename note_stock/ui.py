@@ -857,6 +857,10 @@ class MainWindow(QMainWindow):
         self.recurrence_label = label("", "muted")
         self.recurrence_label.setWordWrap(True)
         self.posting_fields.addWidget(self.recurrence_label)
+        self.planned_time_label = QLabel()
+        self.planned_time_label.setWordWrap(True)
+        self.planned_time_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.posting_fields.addWidget(self.planned_time_label)
         self.public_url_label = QLabel()
         self.public_url_label.setTextFormat(Qt.TextFormat.RichText)
         self.public_url_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
@@ -1060,6 +1064,10 @@ class MainWindow(QMainWindow):
 
     def refresh_controls(self):
         p = self.current or {}
+        planned_due = p.get('due') or (self.store.queue_schedule().get(p['id']) if p.get('status')=='queued' else None)
+        self.planned_time_label.setText('投稿予定 '+datetime.fromtimestamp(planned_due,JST).strftime('%Y/%m/%d %H:%M')
+                                       +'（日本時間）' if planned_due else '')
+        self.planned_time_label.setVisible(bool(planned_due))
         public_url = p.get('url','') if p.get('status')=='published' else ''
         self.public_url_label.setText(
             f'公開URL <a href="{escape(public_url, quote=True)}">{escape(public_url)}</a>' if public_url else ''
@@ -1108,6 +1116,7 @@ class MainWindow(QMainWindow):
     def refresh_list(self, *_):
         try:
             posts = self.store.posts(with_catalog=True)
+            planned = self.store.queue_schedule()
             self.check_statuses = {p['id']:p['status'] for p in posts if p['status'] in {'draft','queued'}}
             draft_ids = set(self.check_statuses)
             self.checked_ids.intersection_update(draft_ids)
@@ -1138,7 +1147,9 @@ class MainWindow(QMainWindow):
                 remote=p['remote_status']
                 detail += ' / note: '+(remote or ('保存済み' if p['draft_key'] else '未保存'))
                 if p["due"]:
-                    detail += " · " + datetime.fromtimestamp(p["due"], JST).strftime("%m/%d %H:%M")
+                    detail += '\n投稿予定 '+datetime.fromtimestamp(p["due"],JST).strftime('%Y/%m/%d %H:%M')+'（日本時間）'
+                elif p['id'] in planned:
+                    detail += '\n投稿予定 '+datetime.fromtimestamp(planned[p['id']],JST).strftime('%Y/%m/%d %H:%M')+'（日本時間）'
                 if p.get('error'):
                     detail += '\n理由: '+p['error']
                 tags=' '.join('#'+tag for tag in p['tags'])
@@ -1261,6 +1272,7 @@ class MainWindow(QMainWindow):
         from .remote import submit
         accepted = []
         errors = []
+        batch = self.store.begin_queue_batch()
         posts = {post['id']:post for post in self.store.posts()}
         displayed = [self.list.item(index).data(Qt.ItemDataRole.UserRole) for index in range(self.list.count())]
         ordered = [pid for pid in displayed if pid in self.checked_ids]
@@ -1271,6 +1283,7 @@ class MainWindow(QMainWindow):
                 if queued and not interrupt_day:
                     continue
                 data = {'queue':True,'queue_only':True} if queued else {'queue':True,'draft_queue':True}
+                data['queue_batch'] = batch
                 if interrupt_day:
                     start = datetime.strptime(interrupt_day,'%Y-%m-%d')
                     data['interrupt_day'] = (start+timedelta(days=len(accepted))).strftime('%Y-%m-%d')
@@ -1278,11 +1291,14 @@ class MainWindow(QMainWindow):
                 accepted.append(pid)
             except Exception as exc:
                 errors.append(f"{posts.get(pid,{}).get('title',pid)}: {exc}")
+        summary = self.store.seal_queue_batch(batch,errors)
         self.checked_ids.difference_update(accepted)
         self._displayed_rows = None
         self.refresh_list()
-        self.notify(f'{len(accepted)}件のキュー追加を受け付けました。'
-                    + ('\n'+'\n'.join(errors) if errors else ''),bool(errors))
+        if summary:
+            self.notify(summary['message'],not summary['ok'])
+        else:
+            self.statusBar().showMessage(f'{len(accepted)}件のキュー追加を受け付けました。')
 
     def refresh(self):
         self.refresh_list()

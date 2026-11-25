@@ -24,7 +24,7 @@ from .loading_indicator import prepare_loading_emoji,body_loading_text,loading_t
 ACTION_NAMES={'sync_articles':'note同期','save_note_draft':'下書き保存','refresh_article':'本文・公開条件の読み込み',
     'schedule':'予約・日時変更','cancel_schedule':'予約取消','publish_note':'投稿・更新','delete_note':'記事削除',
     'tags':'タグ変更','pause':'自動投稿の停止','resume':'自動投稿の再開','relogin_note':'noteへの再ログイン',
-    'relogin_disconnect':'再ログイン画面の切断'}
+    'relogin_disconnect':'再ログイン画面の切断','queue_batch':'キューへの一括追加'}
 RECORD_FOOTER='note操作記録'
 MENU_TEXT='## 操作メニュー\n次の操作を選んでください。'
 OLD_RESERVATION_PROGRESS='noteから本文と公開条件を確認しています。完了すると予約カレンダーが開きます。'
@@ -91,7 +91,8 @@ async def show_view(i,method,*args,**kwargs):
 def article_text(store,post,*,publish_checked=False):
     remote=store.catalog_state(post['id']).get('remote_status','未保存')
     summary=post.get('native_summary',{})
-    due=datetime.fromtimestamp(post['due'],JST).strftime('%Y-%m-%d %H:%M') if post.get('due') else 'なし'
+    planned=post.get('due') or (store.queue_schedule().get(post['id']) if post['status']=='queued' else None)
+    due=datetime.fromtimestamp(planned,JST).strftime('%Y-%m-%d %H:%M') if planned else 'なし'
     ready=bool(post.get('native_ready')) and (post.get('status')!='review' or publish_checked)
     price=('無料' if summary['price']==0 else str(summary['price'])+'円') if ready and 'price' in summary else '未確認'
     preparation=''
@@ -104,7 +105,7 @@ def article_text(store,post,*,publish_checked=False):
     return (f"{article_display_title(post)}\nnote: {remote}\n管理: {STATUSES.get(post['status'],post['status'])}"
             f"{public_url}"
             f"{reason}"
-            f"\n予約: {due}（日本時間）\n価格: {price}"
+            f"\n投稿予定: {due}（日本時間）\n価格: {price}"
             f"{tags}{preparation}\n\n{post['body'][:900]}")[:1800]
 
 
@@ -605,6 +606,9 @@ class ArticleRows(GuardLayoutView):
         self.add_item(discord.ui.TextDisplay(self.text))
         for post,_ in entries:
             label=('📃 ' if post.get('native_ready') else '')+STATUSES.get(post['status'],post['status'])+'｜'+(post['title'] or '無題')
+            scheduled=post.get('due') or listing.planned.get(post['id'])
+            if scheduled and post['status'] in {'queued','scheduled','native_reserved'}:
+                label=datetime.fromtimestamp(scheduled,JST).strftime('%Y/%m/%d %H:%M')+'｜'+label
             # Button labels are plain text; they do not interpret Markdown.
             title=' '.join(label.split());units=0;chars=[]
             for char in title:
@@ -636,6 +640,7 @@ class Articles(GuardView):
 
     def __init__(self,client,kind='all',page=0,query=''):
         super().__init__(client)
+        self.planned=client.store.queue_schedule()
         self.kind,self.query=kind,query
         entries=[]
         with client.store.connect() as connection:
@@ -1228,15 +1233,22 @@ class NoteClient(discord.Client):
                 # The persistent Menu registered in setup_hook handles these stable
                 # component IDs, including after restarting the app.
                 sent_ids=self.store.notification_message_ids(nid)
+                batch=nid.startswith('queue-batch:')
                 if not sent_ids['result_id']:
                     nonce=int(hashlib.sha256((nid+':result').encode()).hexdigest()[:15],16)
                     with handle_message_parameters(nonce=nonce,
                             embeds=[operation_embed(self.store,nid,body)],
+                            **({'view':Menu(self,root=True)} if batch else {}),
+                            **({'files':[discord.File(BytesIO(body['message'].encode('utf-8')),filename='queue-results.txt')]}
+                               if batch and len(body['message'])>3900 else {}),
                             allowed_mentions=discord.AllowedMentions.none()) as params:
                         params.payload['enforce_nonce']=True
                         sent=await self.http.send_message(channel.id,params=params)
                     self.store.record_notification_message(nid,'result_id',sent['id'])
                     sent_ids['result_id']=str(sent['id'])
+                if batch and not sent_ids['menu_id']:
+                    self.store.record_notification_message(nid,'menu_id',sent_ids['result_id'])
+                    sent_ids['menu_id']=sent_ids['result_id']
                 if not sent_ids['menu_id']:
                     nonce=int(hashlib.sha256((nid+':menu').encode()).hexdigest()[:15],16)
                     with handle_message_parameters(content=MENU_TEXT,nonce=nonce,view=Menu(self,root=True),

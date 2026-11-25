@@ -76,7 +76,9 @@ def test_bulk_failure_keeps_failed_checkbox_and_attempts_remaining_items(screen,
     window.queue_checked_articles()
     assert window.checked_ids == {ids[1]}
     assert store.operation_history()["total"] == 2
-    assert "この1件だけ失敗" in window.statusBar().currentMessage()
+    for job in store.operation_history()["items"]:
+        store.complete_job(job["id"],True,"キューへ追加")
+    assert "この1件だけ失敗" in store.pending_notifications()[0][1]["message"]
 
 
 def test_bulk_queue_rechecks_changed_article_before_browser_work(screen, monkeypatch):

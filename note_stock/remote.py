@@ -227,6 +227,7 @@ class RemoteController(QObject):
         if not self.current:
             return
         automatic=self.background_sync
+        batch=self.current['data'].get('queue_batch')
         selection_read=(self.current['action']=='refresh_article' and self.current['data'].get('selection_read'))
         if automatic:
             previous=self.store.setting('background_sync_error','')
@@ -234,7 +235,7 @@ class RemoteController(QObject):
             self.store.set_setting('background_sync_error',error)
             if error and error!=previous:
                 self.window.statusBar().showMessage(error)
-        self.store.complete_job(self.current['id'],status in SUCCESS,message,url,
+        summary=self.store.complete_job(self.current['id'],status in SUCCESS,message,url,
                                 notify=not automatic and not selection_read)
         if self.current['action']=='relogin_note':
             self.store.set_setting('paused',True)
@@ -249,7 +250,10 @@ class RemoteController(QObject):
         if warning: self.window.notify(warning,True)
         if not automatic:
             self.window.note_action_required('')
-            self.window.notify(message+('\n公開URL: '+url if status=='published' and url else ''),status not in SUCCESS)
+            if not batch:
+                self.window.notify(message+('\n公開URL: '+url if status=='published' and url else ''),status not in SUCCESS)
+            elif summary:
+                self.window.notify(summary['message'],not summary['ok'])
         pid=self.current['post_id']
         if pid and pid==self.window.current_id and not self.window.dirty:
             try:

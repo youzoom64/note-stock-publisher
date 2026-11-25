@@ -397,8 +397,25 @@ class Store(RemoteStore):
         if previous and previous['day']==day.isoformat():
             return
         c.execute('DELETE FROM recurring_overrides WHERE post_id=?',(post_id,))
+        plan=self.queue_schedule(stamp,connection=c,exclude=post_id)
+        following=[(datetime.fromtimestamp(scheduled,JST).date()+timedelta(days=1),pid)
+                   for pid,scheduled in plan.items() if datetime.fromtimestamp(scheduled,JST).date()>=day]
+        for _,pid in following:
+            c.execute('DELETE FROM recurring_overrides WHERE post_id=?',(pid,))
+        for shifted,pid in following:
+            c.execute('INSERT INTO recurring_overrides VALUES(?,?)',(shifted.isoformat(),pid))
+        c.execute('INSERT INTO recurring_overrides VALUES(?,?)',(day.isoformat(),post_id))
+
+    def queue_schedule(self,stamp=None,*,connection=None,exclude=''):
+        stamp=now_ts() if stamp is None else stamp
+        if connection is None:
+            with self.connect() as c:
+                return self.queue_schedule(stamp,connection=c,exclude=exclude)
+        c=connection
+        recurrence=self.setting('recurrence',{'days':list(range(7)), 'time':'09:00'})
+        time=datetime.strptime(recurrence['time'],'%H:%M').time().replace(tzinfo=JST)
         queued=c.execute("SELECT id FROM posts WHERE status='queued' AND id<>? ORDER BY position,created",
-                         (post_id,)).fetchall()
+                         (exclude,)).fetchall()
         queued_ids={row['id'] for row in queued}
         today=datetime.fromtimestamp(stamp,JST).date()
         fixed={date.fromisoformat(row['day']):row['post_id'] for row in c.execute(
@@ -408,27 +425,26 @@ class Store(RemoteStore):
         normal=iter(row['id'] for row in queued if row['id'] not in fixed_ids)
         next_normal=next(normal,None)
         cursor=today
-        plan=[]
+        plan={}
         while next_normal is not None or fixed:
-            moment=datetime.combine(cursor,when.timetz())
+            if next_normal is None:
+                cursor=min(fixed)
+            moment=datetime.combine(cursor,time)
             if moment.timestamp()>stamp:
                 chosen=fixed.pop(cursor,None)
                 if chosen is None and cursor.weekday() in recurrence['days']:
                     chosen=next_normal
                     next_normal=next(normal,None)
                 if chosen:
-                    plan.append((cursor,chosen))
+                    plan[chosen]=moment.timestamp()
             else:
                 expired=fixed.pop(cursor,None)
                 if expired:
-                    plan.append((cursor,expired))
+                    plan[expired]=moment.timestamp()
+            if next_normal is None and not fixed:
+                break
             cursor+=timedelta(days=1)
-        following=[(scheduled+timedelta(days=1),pid) for scheduled,pid in plan if scheduled>=day]
-        for _,pid in following:
-            c.execute('DELETE FROM recurring_overrides WHERE post_id=?',(pid,))
-        for shifted,pid in following:
-            c.execute('INSERT INTO recurring_overrides VALUES(?,?)',(shifted.isoformat(),pid))
-        c.execute('INSERT INTO recurring_overrides VALUES(?,?)',(day.isoformat(),post_id))
+        return plan
 
     def claim(self, stamp, post_id=None, slot=None):
         with self.connect() as c:

@@ -18,6 +18,9 @@ class RemoteStore:
                     result TEXT NOT NULL DEFAULT '{}', created REAL NOT NULL, updated REAL NOT NULL);
                 CREATE TABLE IF NOT EXISTS notifications(
                     id TEXT PRIMARY KEY, body TEXT NOT NULL, delivered INTEGER NOT NULL DEFAULT 0);
+                CREATE TABLE IF NOT EXISTS queue_batches(
+                    id TEXT PRIMARY KEY, sealed INTEGER NOT NULL DEFAULT 0,
+                    errors TEXT NOT NULL DEFAULT '[]');
                 CREATE TABLE IF NOT EXISTS catalog(
                     account TEXT NOT NULL, note_key TEXT NOT NULL, post_id TEXT NOT NULL,
                     remote_status TEXT NOT NULL, remote_updated TEXT NOT NULL DEFAULT '',
@@ -71,7 +74,10 @@ class RemoteStore:
                     if data.get('interrupt_day') and details.get('interrupt_day')!=data['interrupt_day']:
                         if pending['state']=='running':
                             raise ValueError('キュー追加が完了してから割り込み日を指定してください。')
+                        original_batch=details.get('queue_batch')
                         details.update(data)
+                        if original_batch:
+                            details['queue_batch']=original_batch
                         c.execute('UPDATE jobs SET data=? WHERE id=?',
                                   (json.dumps(details,ensure_ascii=False),pending['id']))
                     return pending['id']
@@ -141,6 +147,10 @@ class RemoteStore:
         with self.connect() as c:
             c.execute('UPDATE jobs SET state=?,result=?,updated=? WHERE id=?',
                       ('done' if ok else 'failed',json.dumps(result,ensure_ascii=False),timestamp(),jid))
+            job=c.execute('SELECT data FROM jobs WHERE id=?',(jid,)).fetchone()
+            batch=json.loads(job['data']).get('queue_batch') if job else None
+            if batch:
+                return self._complete_queue_batch(c,batch)
             local_only=notify and c.execute("""SELECT 1 FROM jobs WHERE id=? AND
                 (request_key LIKE 'reservation-preflight:%' OR request_key LIKE 'publish-preflight:%'
                  OR action='preview_article')""",(jid,)).fetchone()
@@ -148,8 +158,65 @@ class RemoteStore:
                 c.execute('INSERT OR IGNORE INTO notifications(id,body) VALUES(?,?)',
                           ('job:'+jid,json.dumps(result,ensure_ascii=False)))
 
+    def begin_queue_batch(self):
+        batch=uuid.uuid4().hex
+        with self.connect() as c:
+            c.execute('INSERT INTO queue_batches(id) VALUES(?)',(batch,))
+        return batch
+
+    def seal_queue_batch(self,batch,errors):
+        with self.connect() as c:
+            c.execute('BEGIN IMMEDIATE')
+            c.execute('UPDATE queue_batches SET sealed=1,errors=? WHERE id=?',
+                      (json.dumps(errors,ensure_ascii=False),batch))
+            return self._complete_queue_batch(c,batch)
+
+    def _complete_queue_batch(self,c,batch):
+        if c.execute('SELECT 1 FROM notifications WHERE id=?',('queue-batch:'+batch,)).fetchone():
+            return None
+        group=c.execute('SELECT * FROM queue_batches WHERE id=?',(batch,)).fetchone()
+        if not group or not group['sealed']:
+            return None
+        jobs=c.execute("SELECT state,data,result FROM jobs WHERE json_extract(data,'$.queue_batch')=? "
+                       "ORDER BY created,rowid",(batch,)).fetchall()
+        if any(job['state'] in {'waiting','running'} for job in jobs):
+            return None
+        errors=json.loads(group['errors'])
+        for job in jobs:
+            if job['state']=='failed':
+                details=json.loads(job['data'])
+                result=json.loads(job['result'])
+                errors.append(details.get('_history_title','記事')+': '+result.get('message','追加できませんでした。'))
+        if not jobs and not errors:
+            c.execute('DELETE FROM queue_batches WHERE id=?',(batch,))
+            return None
+        successful=sum(job['state']=='done' for job in jobs)
+        message=f'キューへの一括追加が完了しました。\n成功 {successful}件 / 失敗 {len(errors)}件'
+        if errors:
+            message+='\n\n'+'\n'.join(errors)
+        result={'ok':not errors,'message':message,'url':'','action':'queue_batch'}
+        inserted=c.execute('INSERT OR IGNORE INTO notifications(id,body) VALUES(?,?)',
+                           ('queue-batch:'+batch,json.dumps(result,ensure_ascii=False)))
+        return result if inserted.rowcount else None
+
     def recover_jobs(self):
         with self.connect() as c:
+            legacy=c.execute("""SELECT j.id,j.data FROM jobs j LEFT JOIN notifications n ON n.id='job:'||j.id
+                WHERE j.action='save_note_draft' AND json_extract(j.data,'$.queue_batch') IS NULL
+                AND (json_extract(j.data,'$.draft_queue')=1 OR json_extract(j.data,'$.queue_only')=1)
+                AND (j.state IN ('waiting','running') OR n.delivered=0)""").fetchall()
+            if legacy:
+                batch=uuid.uuid4().hex
+                c.execute('INSERT INTO queue_batches(id,sealed) VALUES(?,1)',(batch,))
+                for job in legacy:
+                    details=json.loads(job['data'])
+                    details['queue_batch']=batch
+                    c.execute('UPDATE jobs SET data=? WHERE id=?',(json.dumps(details,ensure_ascii=False),job['id']))
+                    c.execute('UPDATE notifications SET delivered=1 WHERE id=?',('job:'+job['id'],))
+            for group in c.execute('SELECT id,errors FROM queue_batches WHERE sealed=0').fetchall():
+                errors=json.loads(group['errors'])+['前回の一括受付が途中で中断されました。']
+                c.execute('UPDATE queue_batches SET sealed=1,errors=? WHERE id=?',
+                          (json.dumps(errors,ensure_ascii=False),group['id']))
             ids=[row[0] for row in c.execute("SELECT id FROM jobs WHERE state='running'")]
             stale=[row[0] for row in c.execute("""SELECT id FROM jobs WHERE state='waiting'
                 AND (request_key LIKE 'reservation-preflight:%' OR request_key LIKE 'publish-preflight:%')""")]
@@ -157,6 +224,9 @@ class RemoteStore:
             self.complete_job(jid,False,'前回の処理が中断されました。note上の結果を確認してください。自動再送はしません。')
         for jid in stale:
             self.complete_job(jid,False,'前回の公開条件の確認は中断されました。',notify=False)
+        with self.connect() as c:
+            for group in c.execute('SELECT id FROM queue_batches WHERE sealed=1').fetchall():
+                self._complete_queue_batch(c,group['id'])
 
     def cancel_publish_check(self,jid):
         result=json.dumps({'ok':False,'message':'公開条件の確認を中止しました。','url':''},ensure_ascii=False)
