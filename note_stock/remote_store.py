@@ -55,6 +55,18 @@ class RemoteStore:
             row=c.execute('SELECT id FROM jobs WHERE request_key=?',(key,)).fetchone()
             if row:
                 return row['id']
+            if (data or {}).get('draft_queue'):
+                post=c.execute('SELECT status FROM posts WHERE id=?',(post_id,)).fetchone()
+                if not post or post['status']!='draft':
+                    raise ValueError('下書きの記事を選んでください。')
+                self.require_schedulable(post_id,connection=c)
+                pending=c.execute(
+                    "SELECT id FROM jobs WHERE post_id=? AND action='save_note_draft' "
+                    "AND state IN ('waiting','running') AND json_extract(data,'$.queue')=1",
+                    (post_id,),
+                ).fetchone()
+                if pending:
+                    return pending['id']
             if ui_session is not None:
                 current=c.execute('SELECT value FROM settings WHERE key=?',('discord_active_ui',)).fetchone()
                 if not current or json.loads(current['value'])!=ui_session:

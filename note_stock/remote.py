@@ -134,7 +134,11 @@ class RemoteController(QObject):
                 self.finish('saved','予約を取り消しました。noteの記事は残っています。','')
                 return
             post=self.store.get(pid) if pid else None
-            if publish_check or action in {'schedule','publish_note','tags'}:
+            if data.get('draft_queue'):
+                if post['status']!='draft':
+                    raise ValueError('受付後に下書きの状態が変わりました。記事を確認してください。')
+                self.store.require_schedulable(pid)
+            if publish_check or action in {'schedule','publish_note','tags'} or data.get('draft_queue'):
                 if not connected:
                     raise ValueError('PCの設定でnoteへのログインを確認してから、やり直してください。')
                 if self.window.dirty and pid==self.window.current_id:

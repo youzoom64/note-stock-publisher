@@ -136,8 +136,10 @@ class BrowserWorker(QThread):
                             self.store.set_schedule(self.post['id'],self.import_due)
                         elif self.items==['queue']:
                             current=self.store.get(self.post['id'])
-                            self.store.save(current['id'],current['title'],current['body'],current['tags'],'','queued')
+                            self.store.save(current['id'],current['title'],current['body'],current['tags'],current['image'],'queued')
                         status,message,url='saved','noteへの下書き保存と再読込を確認しました。',''
+                        if self.items==['queue']:
+                            message='下書きの保存と再読込を確認し、定期投稿のキューへ追加しました。'
                     elif self.action=='preview_article':
                         adapter.read_article_preview(self.post)
                         status,message,url='saved','本文プレビューを読み込みました。',''

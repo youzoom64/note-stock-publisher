@@ -8,9 +8,9 @@ from PySide6.QtGui import QColor, QDesktopServices, QIcon, QPainter, QPalette, Q
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QLineEdit, QPlainTextEdit, QComboBox, QListWidget, QListWidgetItem, QSplitter,
-    QFormLayout, QCalendarWidget, QDateEdit, QDateTimeEdit, QTimeEdit, QDialog, QDialogButtonBox, QCheckBox,
+    QFormLayout, QCalendarWidget, QDateEdit, QDateTimeEdit, QDialog, QDialogButtonBox, QCheckBox,
     QMessageBox, QFrame, QScrollArea, QMenu, QTabWidget,
-    QButtonGroup, QRadioButton, QSpinBox, QStyle, QStyledItemDelegate, QTableView, QToolButton,
+    QButtonGroup, QRadioButton, QSpinBox, QStyle, QStyledItemDelegate, QTableView, QToolButton, QStyleOptionViewItem,
 )
 
 from .platform import autostart_enabled, set_autostart
@@ -135,6 +135,17 @@ class ArticleRowDelegate(QStyledItemDelegate):
         selected = option.state & QStyle.StateFlag.State_Selected
         if selected:
             painter.fillRect(row.left(), row.top(), 3, row.height(), QColor('#16845e'))
+        check = QStyleOptionViewItem(option)
+        self.initStyleOption(check,index)
+        text_left = row.left() + 13
+        if check.features & QStyleOptionViewItem.ViewItemFeature.HasCheckIndicator:
+            style = option.widget.style()
+            check.rect = style.subElementRect(QStyle.SubElement.SE_ItemViewItemCheckIndicator,check,option.widget)
+            check.state &= ~(QStyle.StateFlag.State_On | QStyle.StateFlag.State_Off)
+            check.state |= (QStyle.StateFlag.State_On if check.checkState == Qt.CheckState.Checked
+                            else QStyle.StateFlag.State_Off)
+            style.drawPrimitive(QStyle.PrimitiveElement.PE_IndicatorItemViewItemCheck,check,painter,option.widget)
+            text_left = check.rect.right() + 10
 
         painter.setFont(option.font)
         painter.setPen(QColor('#153f2e' if selected else '#25342f'))
@@ -143,8 +154,8 @@ class ArticleRowDelegate(QStyledItemDelegate):
         lines = text.split('\n')
         baseline = row.top() + (row.height() - len(lines) * metrics.height()) // 2 + metrics.ascent()
         for line in lines:
-            elided = metrics.elidedText(line, Qt.TextElideMode.ElideRight, max(0, row.width() - 23))
-            painter.drawText(row.left() + 13, baseline, elided)
+            elided = metrics.elidedText(line, Qt.TextElideMode.ElideRight, max(0, row.right() - text_left - 10))
+            painter.drawText(text_left, baseline, elided)
             baseline += metrics.height()
         painter.restore()
 
@@ -384,7 +395,8 @@ class SettingsDialog(QDialog):
             self.days.append(check)
             days.addWidget(check)
         layout.addLayout(days)
-        self.time = QTimeEdit(QTime.fromString(recurrence["time"], "HH:mm"))
+        from .clock_picker import ClockTimeEdit
+        self.time = ClockTimeEdit(QTime.fromString(recurrence["time"], "HH:mm"))
         self.time.setDisplayFormat("HH:mm")
         self.time.setKeyboardTracking(False)
         form = QFormLayout()
@@ -581,6 +593,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.store = store
         self.current_id = None
+        self.checked_ids = set()
         self.current = None
         self.image = ""
         self.dirty = False
@@ -742,6 +755,16 @@ class MainWindow(QMainWindow):
         self.list.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
         self.list.currentItemChanged.connect(self.selection_changed)
         self.list.itemDoubleClicked.connect(self.request_selected_article)
+        self.list.itemChanged.connect(self.article_check_changed)
+        checks = QHBoxLayout()
+        self.check_all_button = button('全チェック',self.check_all_drafts)
+        self.check_all_button.setToolTip('表示中の下書きをすべてチェックします。')
+        self.clear_checks_button = button('チェック解除',self.clear_article_checks)
+        self.queue_checked_button = button('キューへ追加 (0)',self.queue_checked_articles,True)
+        self.queue_checked_button.setEnabled(False)
+        for control in (self.check_all_button,self.clear_checks_button,self.queue_checked_button):
+            checks.addWidget(control)
+        pane.addLayout(checks)
         pane.addWidget(self.list, 1)
         order = QHBoxLayout()
         self.move_up = button("↑ 上へ", lambda: self.reorder(-1))
@@ -1050,10 +1073,16 @@ class MainWindow(QMainWindow):
     def refresh_list(self, *_):
         try:
             posts = self.store.posts(with_catalog=True)
+            draft_ids = {p['id'] for p in posts if p['status']=='draft'}
+            self.checked_ids.intersection_update(draft_ids)
             with self.store.connect() as connection:
                 reading = {row['post_id'] for row in connection.execute(
                     "SELECT DISTINCT post_id FROM jobs WHERE action IN ('refresh_article','schedule') "
                     "AND state IN ('waiting','running')"
+                )}
+                queuing = {row['post_id'] for row in connection.execute(
+                    "SELECT post_id FROM jobs WHERE action='save_note_draft' "
+                    "AND state IN ('waiting','running') AND json_extract(data,'$.draft_queue')=1"
                 )}
             query = self.search.text().casefold()
             filter_key = self.filter_group.checkedButton().property('status')
@@ -1068,6 +1097,8 @@ class MainWindow(QMainWindow):
                 detail = STATUSES[p["status"]]
                 if p["id"] in reading:
                     detail = "本文取得中 · " + detail
+                if p["id"] in queuing:
+                    detail = "キュー追加中 · " + detail
                 remote=p['remote_status']
                 detail += ' / note: '+(remote or ('保存済み' if p['draft_key'] else '未保存'))
                 if p["due"]:
@@ -1086,6 +1117,9 @@ class MainWindow(QMainWindow):
                 for pid, text, tooltip, color in rows:
                     item = QListWidgetItem(text)
                     item.setData(Qt.ItemDataRole.UserRole, pid)
+                    if pid in draft_ids:
+                        item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                        item.setCheckState(Qt.CheckState.Checked if pid in self.checked_ids else Qt.CheckState.Unchecked)
                     item.setToolTip(tooltip)
                     item.setBackground(QColor(color))
                     self.list.addItem(item)
@@ -1102,6 +1136,55 @@ class MainWindow(QMainWindow):
             self.fail(exc)
         finally:
             self.list.blockSignals(False)
+            self.update_check_controls()
+
+    def update_check_controls(self):
+        count = len(self.checked_ids)
+        self.queue_checked_button.setText(f'キューへ追加 ({count})')
+        self.queue_checked_button.setEnabled(bool(count))
+        self.clear_checks_button.setEnabled(bool(count))
+
+    def article_check_changed(self,item):
+        pid = item.data(Qt.ItemDataRole.UserRole)
+        if item.checkState() == Qt.CheckState.Checked:
+            self.checked_ids.add(pid)
+        else:
+            self.checked_ids.discard(pid)
+        self.update_check_controls()
+
+    def check_all_drafts(self):
+        for index in range(self.list.count()):
+            item = self.list.item(index)
+            if item.data(Qt.ItemDataRole.CheckStateRole) is not None:
+                item.setCheckState(Qt.CheckState.Checked)
+
+    def clear_article_checks(self):
+        self.checked_ids.clear()
+        for index in range(self.list.count()):
+            item = self.list.item(index)
+            if item.data(Qt.ItemDataRole.CheckStateRole) is not None:
+                item.setCheckState(Qt.CheckState.Unchecked)
+        self.update_check_controls()
+
+    def queue_checked_articles(self):
+        if not self.checked_ids or not self.can_leave():
+            return
+        from .remote import submit
+        accepted = []
+        errors = []
+        posts = {post['id']:post for post in self.store.posts()}
+        ordered = sorted(self.checked_ids,key=lambda pid:posts.get(pid,{}).get('position',float('inf')))
+        for pid in ordered:
+            try:
+                submit(self.store,'save_note_draft',pid,{'queue':True,'draft_queue':True})
+                accepted.append(pid)
+            except Exception as exc:
+                errors.append(f"{posts.get(pid,{}).get('title',pid)}: {exc}")
+        self.checked_ids.difference_update(accepted)
+        self._displayed_rows = None
+        self.refresh_list()
+        self.notify(f'{len(accepted)}件のキュー追加を受け付けました。'
+                    + ('\n'+'\n'.join(errors) if errors else ''),bool(errors))
 
     def refresh(self):
         self.refresh_list()

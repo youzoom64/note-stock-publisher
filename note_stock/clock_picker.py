@@ -221,3 +221,44 @@ class PostingTimeDialog(QDialog):
     def accept(self):
         self.time_edit.interpretText()
         super().accept()
+
+
+class ClockTimeEdit(QTimeEdit):
+    def __init__(self, time, parent=None):
+        super().__init__(time, parent)
+        self.clock_open = False
+        self.setToolTip('クリックすると時計で投稿時刻を選べます。')
+        self.lineEdit().installEventFilter(self)
+
+    def eventFilter(self, watched, event):
+        if (watched is self.lineEdit() and event.type() == QEvent.Type.MouseButtonPress
+                and event.button() == Qt.MouseButton.LeftButton):
+            event.accept()
+            self.open_clock()
+            return True
+        return super().eventFilter(watched, event)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            event.accept()
+            self.open_clock()
+        else:
+            super().mousePressEvent(event)
+
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key.Key_Space, Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            event.accept()
+            self.open_clock()
+        else:
+            super().keyPressEvent(event)
+
+    def open_clock(self):
+        if self.clock_open:
+            return
+        self.clock_open = True
+        try:
+            dialog = PostingTimeDialog(QDate.currentDate(), self.time(), self)
+            if dialog.exec() == QDialog.DialogCode.Accepted:
+                self.setTime(dialog.time_edit.time())
+        finally:
+            self.clock_open = False
