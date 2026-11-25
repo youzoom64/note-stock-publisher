@@ -90,8 +90,8 @@ def test_remote_publish_rechecks_conditions_and_preserves_requested_tags(tmp_pat
             # The frontend's defaults must never erase the requested publication tags.
             updated['payload']['hashtags']=[]
             store.capture_native(pid,updated,snapshot,post)
-        def update_tags(self,pid,tags):
-            NativeNoteBrowser.update_tags(self,pid,tags)
+        def update_tags(self,pid,tags,**kwargs):
+            NativeNoteBrowser.update_tags(self,pid,tags,**kwargs)
         def sync_articles(self):
             store.merge_catalog([{**row,'status':'published' if scenario=='external-publish' else 'draft'}],True)
         def publish(self,post):

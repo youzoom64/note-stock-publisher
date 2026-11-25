@@ -83,6 +83,11 @@ class Store(RemoteStore):
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.db = self.root / "note-stock.sqlite3"
+        if self.db.exists():
+            with sqlite3.connect(self.db) as source:
+                if not source.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='article_hashtags'").fetchone():
+                    with sqlite3.connect(self.root/'before-independent-hashtags.sqlite3') as target:
+                        source.backup(target)
         if self.db.exists() and not (self.root/'before-discord-v2.sqlite3').exists():
             with sqlite3.connect(self.db) as source:
                 if source.execute('PRAGMA user_version').fetchone()[0]<2:
@@ -125,6 +130,23 @@ class Store(RemoteStore):
             if 'tags_overridden' not in columns:
                 c.execute('ALTER TABLE posts ADD COLUMN tags_overridden INTEGER NOT NULL DEFAULT 0')
                 c.execute("UPDATE posts SET tags_overridden=1 WHERE native_ready=1 OR tags<>'[]'")
+            migrate_tags=not c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='article_hashtags'").fetchone()
+            c.executescript("""
+                CREATE TABLE IF NOT EXISTS article_hashtags(
+                    post_id TEXT PRIMARY KEY, value TEXT NOT NULL DEFAULT '[]',
+                    revision INTEGER NOT NULL DEFAULT 0, initialized INTEGER NOT NULL DEFAULT 0,
+                    remote_value TEXT NOT NULL DEFAULT '[]');
+                CREATE TRIGGER IF NOT EXISTS hashtag_create AFTER INSERT ON posts
+                    BEGIN INSERT INTO article_hashtags(post_id,value,initialized)
+                        VALUES(NEW.id,NEW.tags,NEW.tags<>'[]'); END;
+                CREATE TRIGGER IF NOT EXISTS hashtag_delete AFTER DELETE ON posts
+                    BEGIN DELETE FROM article_hashtags WHERE post_id=OLD.id; END;
+                CREATE TRIGGER IF NOT EXISTS legacy_hashtags_read_only BEFORE UPDATE OF tags ON posts
+                    BEGIN SELECT RAISE(ABORT,'Use the dedicated hashtag editor'); END;
+            """)
+            if migrate_tags:
+                c.execute("""INSERT INTO article_hashtags(post_id,value,initialized)
+                    SELECT id,tags,(tags_overridden=1 OR native_ready=1 OR tags<>'[]') FROM posts""")
             c.execute("""CREATE TRIGGER IF NOT EXISTS article_preview_invalidate
                 AFTER UPDATE OF body,native_html,draft_key ON posts
                 WHEN OLD.body IS NOT NEW.body OR OLD.native_html IS NOT NEW.native_html
@@ -202,32 +224,40 @@ class Store(RemoteStore):
             c.executemany("INSERT OR REPLACE INTO settings VALUES(?,?)",
                           [(key,json.dumps(value,ensure_ascii=False)),('account_verified','false'),('paused','true')])
 
-    @staticmethod
-    def decode(row):
+    def decode(self, row, connection=None):
         if row is None:
             raise ValueError("原稿が見つかりません。")
         item = dict(row)
-        item["tags"] = json.loads(item["tags"])
+        if connection is None:
+            with self.connect() as c:
+                state=c.execute('SELECT * FROM article_hashtags WHERE post_id=?',(item['id'],)).fetchone()
+        else:
+            state=connection.execute('SELECT * FROM article_hashtags WHERE post_id=?',(item['id'],)).fetchone()
+        if state is None:
+            raise ValueError('ハッシュタグの保存データがありません。空の値で上書きせず処理を停止しました。')
+        item['tags'] = json.loads(state['value'])
+        item['tags_revision'] = state['revision']
+        item['remote_tags'] = json.loads(state['remote_value'])
         item.pop('native_payload',None)
         item['native_summary']=json.loads(item.get('native_summary','{}'))
         return item
 
     def get(self, post_id):
         with self.connect() as c:
-            return self.decode(c.execute("SELECT * FROM posts WHERE id=?", (post_id,)).fetchone())
+            return self.decode(c.execute("SELECT * FROM posts WHERE id=?", (post_id,)).fetchone(),c)
 
     def posts(self, *, with_catalog=False):
         if with_catalog:
             account = self.setting('account', '')
             with self.connect() as c:
-                return [self.decode(row) for row in c.execute("""
+                return [self.decode(row,c) for row in c.execute("""
                     SELECT p.*, c.remote_status, c.remote_updated
                     FROM posts p LEFT JOIN catalog c
                     ON c.account=? AND c.note_key=p.draft_key AND c.post_id=p.id
                     ORDER BY p.position,p.created
                 """, (account,))]
         with self.connect() as c:
-            return [self.decode(row) for row in c.execute("SELECT * FROM posts ORDER BY position,created")]
+            return [self.decode(row,c) for row in c.execute("SELECT * FROM posts ORDER BY position,created")]
 
     def create(self, source=None):
         post_id, stamp = uuid.uuid4().hex, now_ts()
@@ -242,7 +272,46 @@ class Store(RemoteStore):
                 document=json.dumps(document,ensure_ascii=False)
             c.execute('UPDATE posts SET editor_kind=?,native_html=?,native_document=?,tags_overridden=? WHERE id=?',
                       (source.get('editor_kind','native'),source.get('native_html',''),document,int('tags' in source),post_id))
+            if 'tags' in source:
+                self._write_tags(c,post_id,source['tags'])
         return post_id
+
+    def _write_tags(self, c, post_id, tags, expected_revision=None):
+        """The sole write boundary for user-owned hashtags. Caller holds the transaction."""
+        tags=tags_from_text(' '.join(tags))
+        current=c.execute('SELECT revision,value FROM article_hashtags WHERE post_id=?',(post_id,)).fetchone()
+        if current is None:
+            raise ValueError('ハッシュタグの保存データがありません。')
+        if expected_revision is not None and current['revision']!=expected_revision:
+            raise ValueError('ハッシュタグは別の操作で変更されています。最新の値を読み直してください。保存済みのタグは保持しました。')
+        c.execute('UPDATE article_hashtags SET value=?,revision=revision+1,initialized=1 WHERE post_id=?',
+                  (json.dumps(tags,ensure_ascii=False),post_id))
+
+    def set_tags(self, post_id, tags, *, expected_revision):
+        if type(expected_revision) is not int:
+            raise ValueError('ハッシュタグの更新番号がありません。最新の内容から編集してください。')
+        with self.connect() as c:
+            c.execute('BEGIN IMMEDIATE')
+            self._write_tags(c,post_id,tags,expected_revision)
+
+    def save_fields(self, post_id, changes, *, expected=None, tags_revision=None,
+                    append_to_queue=False, interrupt_day=None):
+        """Apply only explicitly edited fields; omitted fields are never snapshot writes."""
+        if set(changes)-{'title','body','image','status','due','tags'}:
+            raise ValueError('未対応の記事項目です。')
+        if 'tags' in changes and type(tags_revision) is not int:
+            raise ValueError('ハッシュタグの更新番号がありません。最新の内容から編集してください。')
+        current=self.get(post_id)
+        baseline=dict(current)
+        if expected is not None:
+            for field in changes:
+                if field!='tags':
+                    baseline[field]=expected[field]
+        desired={**current,**changes}
+        return self.save(post_id,desired['title'],desired['body'],changes.get('tags'),
+                         desired['image'],desired['status'],desired['due'],
+                         expected=baseline,tags_revision=tags_revision,
+                         append_to_queue=append_to_queue,interrupt_day=interrupt_day)
 
     def import_image(self, source):
         from PySide6.QtGui import QImageReader
@@ -266,7 +335,7 @@ class Store(RemoteStore):
             raise ValueError("見出し画像が見つかりません。画像を選び直してください。")
         return target
 
-    def save(self, post_id, title, body, tags, image, status, due=None, stamp=None, *, append_to_queue=False, interrupt_day=None):
+    def save(self, post_id, title, body, tags, image, status, due=None, stamp=None, *, append_to_queue=False, interrupt_day=None, tags_revision=None, expected=None):
         stamp = now_ts() if stamp is None else stamp
         native_title,native_body=title,body
         if status not in {"draft", "queued", "scheduled"}:
@@ -275,10 +344,23 @@ class Store(RemoteStore):
         if status == "scheduled" and (due is None or due <= stamp):
             raise ValueError("投稿日時は現在より先に設定してください。")
         self.image_path(image)
-        tags = tags_from_text(" ".join(tags))
+        tags = tags_from_text(" ".join(tags)) if tags is not None else None
         with self.connect() as c:
             c.execute("BEGIN IMMEDIATE")
-            old = self.decode(c.execute("SELECT * FROM posts WHERE id=?", (post_id,)).fetchone())
+            old = self.decode(c.execute("SELECT * FROM posts WHERE id=?", (post_id,)).fetchone(),c)
+            values={'title':native_title,'body':native_body,'image':image,'status':status,'due':due if status=='scheduled' else None}
+            if expected is not None:
+                # An unchanged widget never writes its stale snapshot back to the DB.
+                for field in values:
+                    if values[field]==expected[field]:
+                        values[field]=old[field]
+                    elif old[field]!=expected[field]:
+                        name={'title':'タイトル','body':'本文','image':'画像','status':'状態','due':'投稿日時'}[field]
+                        raise ValueError('記事の'+name+'は別の操作で変更されています。最新の内容を読み直してください。')
+                native_title,native_body=values['title'],values['body']
+                title=old['title'] if native_title==old['title'] else native_title.strip()
+                body=old['body'] if native_body==old['body'] else normalize_body(native_body)
+                image,status,due=values['image'],values['status'],values['due']
             if status in {'scheduled','queued'}:
                 self.require_schedulable(post_id,connection=c)
             if old["status"] in LOCKED:
@@ -292,14 +374,13 @@ class Store(RemoteStore):
                 if native_title!=old['title'] or native_body!=old['body'] or image!=old['image']:
                     raise ValueError('本文・装飾・素材は「noteで編集」から変更してください。')
                 title,body=old['title'],old['body']
-                if tags!=old['tags']:
-                    from .secrets import protect
-                    native=self.native_template(post_id)
-                    native['payload']['hashtags']=['#'+tag for tag in tags]
-                    c.execute('UPDATE posts SET native_payload=? WHERE id=?',(protect(native),post_id))
-            c.execute("""UPDATE posts SET title=?,body=?,tags=?,tags_overridden=1,image=?,status=?,due=?,error='',updated=? WHERE id=?""",
-                      (title, body, json.dumps(tags, ensure_ascii=False), image, status,
-                       due if status == "scheduled" else None, stamp, post_id))
+            if tags is not None:
+                self._write_tags(c,post_id,tags,tags_revision)
+            values={'title':title,'body':body,'image':image,'status':status,'due':due if status=='scheduled' else None}
+            changes={field:value for field,value in values.items() if value!=old[field]}
+            changes.update(error='',updated=stamp)
+            c.execute('UPDATE posts SET '+','.join(field+'=?' for field in changes)+' WHERE id=?',
+                      (*changes.values(),post_id))
             if append_to_queue and status=='queued':
                 c.execute("UPDATE posts SET position=(SELECT COALESCE(MAX(position),0)+1 FROM posts) WHERE id=?",
                           (post_id,))
@@ -614,29 +695,38 @@ class Store(RemoteStore):
             status,due='draft',None
         with self.connect() as c:
             c.execute('BEGIN IMMEDIATE')
-            current=c.execute('SELECT updated,draft_key,tags,tags_overridden FROM posts WHERE id=?',(post_id,)).fetchone()
+            current=c.execute('SELECT updated,draft_key FROM posts WHERE id=?',(post_id,)).fetchone()
             if automatic_import:
                 if current is None or current['updated']!=previous['updated'] or current['draft_key']!=previous['draft_key']:
                     raise ValueError('取り込み中に記事の設定が変更されました。変更内容を保持しました。')
-            preserve=(automatic_import or previous.get('_preserve_app_tags',False)) and current['tags_overridden']
-            if preserve:
-                tags=json.loads(current['tags'])
-                template={**template,'payload':{**template['payload'],'hashtags':['#'+tag for tag in tags]}}
-                protected=protect(template)
+            # Remote capture owns only remote_value. Even a manual body refresh
+            # cannot replace initialized user tags (including an intentional empty list).
+            c.execute('UPDATE article_hashtags SET remote_value=? WHERE post_id=?',
+                      (json.dumps(tags,ensure_ascii=False),post_id))
+            state=c.execute('SELECT initialized FROM article_hashtags WHERE post_id=?',(post_id,)).fetchone()
+            if state is None:
+                raise ValueError('ハッシュタグの保存データがありません。')
+            if not state['initialized']:
+                self._write_tags(c,post_id,tags)
             c.execute("""UPDATE posts SET editor_kind='native',native_ready=1,native_html=?,native_document=?,native_fingerprint=?,
-                  native_payload=?,native_owner=?,native_summary=?,title=?,body=?,tags=?,tags_overridden=?,image='',status=?,due=?,error=?,updated=? WHERE id=?""",
+                  native_payload=?,native_owner=?,native_summary=?,title=?,body=?,status=?,due=?,error=?,updated=? WHERE id=?""",
                 (html,json.dumps(snapshot['document'],ensure_ascii=False),snapshot['fingerprint'],protected,owner,json.dumps(summary,ensure_ascii=False),
-                   payload.get('name') or snapshot['title'],snapshot['text'],json.dumps(tags,ensure_ascii=False),int(bool(preserve)),status,due,message,stamp,post_id))
+                   payload.get('name') or snapshot['title'],snapshot['text'],status,due,message,stamp,post_id))
             self.event(c,post_id,status,message or 'noteの本文・全素材・公開設定を取り込みました。投稿予定を保持し、まだ公開していません。',stamp)
 
     def native_template(self, post_id):
         from .secrets import unprotect
         with self.connect() as c:
             row=c.execute('SELECT native_payload FROM posts WHERE id=?',(post_id,)).fetchone()
+            tags=c.execute('SELECT value FROM article_hashtags WHERE post_id=?',(post_id,)).fetchone()
         if not row or not row[0]:
             raise ValueError('noteの公開設定がまだ取り込まれていません。')
         try:
-            return unprotect(row[0])
+            template=unprotect(row[0])
+            if tags is None:
+                raise ValueError('ハッシュタグの保存データがありません。')
+            template['payload']['hashtags']=['#'+tag for tag in json.loads(tags[0])]
+            return template
         except OSError as exc:
             raise ValueError('このWindowsユーザーでは公開設定を復号できません。noteで編集して取り込み直してください。') from exc
 

@@ -1408,7 +1408,9 @@ class MainWindow(QMainWindow):
         self.recurrence_label.setText("定期投稿：" + "・".join("月火水木金土日"[i] for i in recurrence["days"]) + " " + recurrence["time"] + "　／　noteの公開設定を保持")
         if self.current_id and not self.dirty:
             try:
-                self.current = self.store.get(self.current_id)
+                fresh=self.store.get(self.current_id)
+                if fresh!=self.current:
+                    self.load(self.current_id)
             except ValueError:
                 self.load(None)
         self.refresh_controls()
@@ -1488,11 +1490,18 @@ class MainWindow(QMainWindow):
                           (source['status'] if source['status'] in {'draft','queued','scheduled'} else 'draft')
                           if status=='scheduled' and source['draft_key'] else status)
             local_due=source['due'] if local_status=='scheduled' else None
-            warning = self.store.save(self.current_id, title, body,
-                            tags_from_text(self.tags.text()), self.image, local_status,
-                            local_due if status=='scheduled' and source['draft_key'] else due)
+            baseline=self.current if self.current and self.current['id']==self.current_id else source
+            edited_tags=tags_from_text(self.tags.text())
+            desired={'status':local_status,'due':local_due if status=='scheduled' and source['draft_key'] else due,
+                     'image':self.image,'tags':edited_tags}
+            if draft_content is not None and not source['draft_key']:
+                desired.update(title=title,body=body)
+            changes={field:value for field,value in desired.items() if value!=baseline[field]}
+            warning = self.store.save_fields(self.current_id,changes,
+                                            tags_revision=baseline['tags_revision'],expected=baseline)
             self.dirty = False
             self.current = self.store.get(self.current_id)
+            self.load(self.current_id)
             if self.store.setting('account_verified',False):
                 from .remote import submit
                 reserving=status=='scheduled'

@@ -56,6 +56,16 @@ def test_save_records_key_before_native_save_leaves_editor_and_reopens_to_verify
         assert saved['native_ready'] and saved['body']=='本文の保存確認'
         assert saved['tags']==['日記']
         assert store.native_template(pid)['payload']['hashtags']==['#日記']
+        # Saving an existing scheduled/queued draft must not turn a missing
+        # catalog timestamp into an external-change/review state.
+        store.merge_catalog([{'key':key,'title':'保存テスト','status':'draft','owner':'tester','updated':'known-revision'}])
+        store.save_fields(pid,{'status':'scheduled','due':9999999999})
+        store.save_fields(pid,{'status':'queued','due':None})
+        adapter.page=context.new_page()
+        assert adapter.save_draft(store.get(pid))==key
+        assert store.get(pid)['status']=='queued'
+        assert store.get(pid)['tags']==['日記']
+        assert store.catalog_state(pid)['remote_updated']=='known-revision'
         assert state['publications']==0
         browser.close()
 

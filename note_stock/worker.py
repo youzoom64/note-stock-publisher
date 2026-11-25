@@ -23,6 +23,7 @@ class BrowserWorker(QThread):
         self.store, self.action, self.post, self.expected = store, action, post, expected
         self.cancel = threading.Event()
         self.items=[]
+        self.tags_revision=None
         self.import_due=None
         self.recovery_id=''
         self.headless_sync=False
@@ -32,6 +33,15 @@ class BrowserWorker(QThread):
         self.interrupt_day=None
 
     def run(self):
+        if self.action=='prepare_tags':
+            try:
+                # Persist the explicit tag edit independently of subsequent note
+                # reads. The first remote capture must not win over this edit.
+                self.store.set_tags(self.post['id'],self.items,expected_revision=self.tags_revision)
+                self.post=self.store.get(self.post['id'])
+            except ValueError as exc:
+                self.outcome.emit('failed',str(exc),'')
+                return
         capture_catalog_draft = (self.action=='save_note_draft' and self.post
                                  and self.post['draft_key'] and self.post['editor_kind']=='native'
                                  and not self.post['native_ready'])
@@ -138,7 +148,7 @@ class BrowserWorker(QThread):
                             self.store.set_schedule(self.post['id'],self.import_due)
                         elif self.items==['queue']:
                             current=self.store.get(self.post['id'])
-                            self.store.save(current['id'],current['title'],current['body'],current['tags'],current['image'],'queued',
+                            self.store.save_fields(current['id'],{'status':'queued','due':None},
                                             append_to_queue=self.append_to_queue,interrupt_day=self.interrupt_day)
                         status,message,url='saved','noteへの下書き保存と再読込を確認しました。',''
                         if self.items==['queue']:
@@ -171,7 +181,7 @@ class BrowserWorker(QThread):
                             if {k:v for k,v in previous_payload.items() if k not in omit}!={k:v for k,v in latest_payload.items() if k not in omit}:
                                 raise ValueError('noteの公開条件が変更されています。最新の公開条件を確認して再操作してください。')
                         if self.action=='prepare_tags':
-                            adapter.update_tags(original['id'],self.items)
+                            adapter.update_tags(original['id'],self.items,use_current=True)
                             adapter.page=adapter.new_page()
                             adapter.sync_articles()
                             if original['status']=='scheduled':
@@ -180,13 +190,13 @@ class BrowserWorker(QThread):
                                 with self.store.connect() as c:
                                     c.execute("UPDATE posts SET status='queued' WHERE id=?",(original['id'],))
                         elif self.action=='prepare_schedule':
-                            adapter.update_tags(original['id'],original['tags'])
+                            adapter.update_tags(original['id'],original['tags'],use_current=True)
                             adapter.page=adapter.new_page()
                             adapter.sync_articles()
                             self.store.require_schedulable(original['id'])
                             self.store.set_schedule(original['id'],self.import_due)
                         elif self.action=='prepare_publish':
-                            adapter.update_tags(original['id'],original['tags'])
+                            adapter.update_tags(original['id'],original['tags'],use_current=True)
                             adapter.page=adapter.new_page()
                             adapter.sync_articles()
                             if remote_before!='published' and self.store.catalog_state(original['id']).get('remote_status')=='published':
@@ -237,7 +247,7 @@ class BrowserWorker(QThread):
                                 prepared_ok=True
                                 prepared=self.store.get(item['id'])
                                 if self.import_due:
-                                    self.store.save(item['id'],prepared['title'],prepared['body'],prepared['tags'],'','scheduled',self.import_due)
+                                    self.store.save_fields(item['id'],{'status':'scheduled','due':self.import_due})
                                 item['prepared']=True
                             except Exception as exc:
                                 item['ok']=False

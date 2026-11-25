@@ -88,7 +88,7 @@ class Commands:
                 pid = self.store.create()
             old = self.store.get(pid)
             image = self.store.import_image(data['image_file']) if data.get('image_file') else data.get('image',old['image'])
-            tags = data.get('tags',old['tags'])
+            tags = data.get('tags')
             tags = tags_from_text(tags) if isinstance(tags,str) else tags
             due = data.get('due',old['due'])
             if isinstance(due,str):
@@ -99,8 +99,13 @@ class Commands:
             desired=data.get('status',old['status'] if old['status'] in {'draft','queued','scheduled'} else 'draft')
             if desired not in {'draft','queued','scheduled'}:
                 raise ValueError('保存方法が正しくありません。')
-            self.store.save(pid,data.get('title',old['title']),data.get('body',old['body']),tags,image,
-                            'draft' if not old['native_ready'] and old['editor_kind']=='native' else desired,due)
+            changes={field:data[field] for field in ('title','body') if field in data}
+            if 'tags' in data: changes['tags']=tags
+            if 'image' in data or data.get('image_file'): changes['image']=image
+            if 'status' in data:
+                changes['status']='draft' if not old['native_ready'] and old['editor_kind']=='native' else desired
+            if 'due' in data or desired!='scheduled': changes['due']=due if desired=='scheduled' else None
+            self.store.save_fields(pid,changes,tags_revision=data.get('tags_revision',old['tags_revision']),expected=old)
             result = self.store.get(pid)
             if self.store.setting('account_verified',False):
                 result['job_id']=submit(self.store,'save_note_draft',pid,{'due':due if desired=='scheduled' else None,'queue':desired=='queued'})

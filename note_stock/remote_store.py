@@ -48,6 +48,8 @@ class RemoteStore:
             c.execute('''INSERT INTO posts(id,title,body,tags,image,position,created,updated,editor_kind)
                        VALUES(?,?,?,?,?,(SELECT COALESCE(MAX(position),0)+1 FROM posts),?,?,'native')''',
                       (pid,source['title'],source['body'],json.dumps(source.get('tags',[]),ensure_ascii=False),source.get('image',''),stamp,stamp))
+            if 'tags' in source:
+                self._write_tags(c,pid,source['tags'])
             c.execute('INSERT INTO incoming_drafts VALUES(?,?)',(str(key),pid))
         return pid
 

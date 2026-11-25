@@ -132,8 +132,10 @@ class NativeNoteBrowser(NoteBrowser):
             inspector.close()
             if not self.page.is_closed():
                 self.page.close()
-        self.store.merge_catalog([{'key':key,'title':saved['title'],'status':'published' if post['url'] else 'draft',
-                                   'owner':self.store.setting('account',''),'updated':''}],False)
+        catalog=self.store.catalog_state(post['id'])
+        self.store.merge_catalog([{'key':key,'title':saved['title'],
+                                   'status':catalog.get('remote_status') or ('published' if post['status']=='published' else 'draft'),
+                                   'owner':self.store.setting('account',''),'updated':catalog.get('remote_updated','')}],False)
         self.page=self.new_page()
         prepared=self.store.begin_native_edit(post['id'])
         self.edit(prepared,automatic=True)
@@ -141,17 +143,11 @@ class NativeNoteBrowser(NoteBrowser):
         self.update_tags(post['id'],post['tags'],use_current=True)
         return key
 
-    def update_tags(self,pid,tags,*,use_current=False):
-        from .secrets import protect,unprotect
-        with self.store.connect() as c:
-            c.execute('BEGIN IMMEDIATE')
-            current=c.execute('SELECT tags,native_payload FROM posts WHERE id=?',(pid,)).fetchone()
-            template=unprotect(current['native_payload'])
-            if use_current:
-                tags=json.loads(current['tags'])
-            template['payload']['hashtags']=['#'+tag for tag in tags]
-            c.execute('UPDATE posts SET tags=?,native_payload=?,tags_overridden=1 WHERE id=?',
-                      (json.dumps(tags,ensure_ascii=False),protect(template),pid))
+    def update_tags(self,pid,tags,*,use_current=False,expected_revision=None):
+        if not use_current:
+            if expected_revision is None:
+                raise ValueError('ハッシュタグの更新番号がありません。最新の内容から編集してください。')
+            self.store.set_tags(pid,tags,expected_revision=expected_revision)
 
     def delete_article(self,post):
         from playwright.sync_api import TimeoutError as BrowserTimeout
@@ -371,6 +367,7 @@ class NativeNoteBrowser(NoteBrowser):
                 raise VerificationFailed('保存した公開処理と一致しません。送信を停止しました。')
             self.store.checkpoint(post['id'],key=key,submitted=True)
             sent['value']=True
+            template['payload']['hashtags']=self.store.native_template(post['id'])['payload']['hashtags']
             return json.dumps(template['payload'],ensure_ascii=False)
         try:
             self.first_visible([self.button('公開に進む'),self.button('公開設定')],'公開設定').click()

@@ -105,3 +105,36 @@ def test_manual_reservation_preempts_catalog_import(tmp_path):
     controller=SimpleNamespace(store=store,worker=worker,window=SimpleNamespace(busy=lambda:True,quitting=False))
     RemoteController.tick(controller)
     worker.cancel.set.assert_called_once()
+
+
+def test_scheduled_to_queue_gui_save_does_not_resubmit_or_erase_tags(screen,monkeypatch):
+    app,store,pid,window=screen
+    store.capture_native(pid,{'account':'tester','payload':{'free_body':'remote content','hashtags':['#保持するタグ']}},
+                         {'title':'existing note','text':'remote content','document':{},'fingerprint':'same'})
+    store.save_fields(pid,{'status':'scheduled','due':now_ts()+600})
+    window.load(pid)
+    window.tags.text.return_value='#保持するタグ'
+    store.set_tags(pid,['別の操作で保存したタグ'],expected_revision=window.current['tags_revision'])
+    window.mode.currentData.return_value='queued'
+    assert window.save_current()
+    assert store.get(pid)['tags']==['別の操作で保存したタグ']
+    assert store.get(pid)['status']=='queued'
+    assert store.get(pid)['due'] is None
+    # Reproduce the native draft-save recapture that used to replace the tags.
+    class Adapter:
+        def __init__(self,*args): self.context=SimpleNamespace(close=lambda:None)
+        def open(self,*args): pass
+        def save_draft(self,post):
+            begun=store.begin_native_edit(pid)
+            store.capture_native(pid,{'account':'tester','payload':{'free_body':'remote content','hashtags':[]}},
+                                 {'title':'existing note','text':'remote content','document':{},'fingerprint':'same'},begun)
+    monkeypatch.setattr('note_stock.worker.NoteBrowser',Adapter)
+    monkeypatch.setattr('playwright.sync_api.sync_playwright',lambda:nullcontext())
+    monkeypatch.setattr('note_stock.headless_sync.open_note_session',lambda *args:nullcontext())
+    worker=BrowserWorker(store,'save_note_draft',store.get(pid))
+    worker.items=['queue']
+    outcomes=[]
+    worker.outcome.connect(lambda status,*rest:outcomes.append(status))
+    worker.run()
+    assert outcomes==['saved']
+    assert Store(store.root).get(pid)['tags']==['別の操作で保存したタグ']

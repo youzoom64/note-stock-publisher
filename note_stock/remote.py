@@ -49,6 +49,7 @@ def submit(store,action,pid=None,data=None,key=None,ui_session=None):
                 raise ValueError('note側の変更があります。「今すぐ投稿・更新」から公開条件を確認してください。')
         if action=='tags':
             data['tags']=tags_from_text(data.get('tags',''))
+            data.setdefault('tags_revision',post['tags_revision'])
         if action=='schedule' or (action=='save_note_draft' and data.get('due') is not None):
             import math
             due=data.get('due')
@@ -177,6 +178,7 @@ class RemoteController(QObject):
             self.worker.background_read=bool(data.get('background_read'))
             self.worker.headless_sync=self.background_sync
             self.worker.items=['queue'] if data.get('queue') else data.get('tags',[])
+            self.worker.tags_revision=data.get('tags_revision')
             self.worker.append_to_queue=bool(data.get('draft_queue'))
             self.worker.interrupt_day=data.get('interrupt_day')
             self.worker.import_due=data.get('due')
