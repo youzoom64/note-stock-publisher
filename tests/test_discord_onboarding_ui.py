@@ -1,0 +1,81 @@
+from PySide6.QtWidgets import QApplication,QDialog
+from note_stock.discord_ui import DiscordSetupDialog,DiscordPanel
+from note_stock.store import Store
+
+
+def test_onboarding_choices_back_blank_name_and_cancel():
+    app=QApplication.instance() or QApplication([])
+    dialog=DiscordSetupDialog()
+    assert not dialog.next.isEnabled()
+    assert 'Discord連携しますか？' in dialog.pages.widget(0).layout().itemAt(0).widget().text()
+    assert 'iPhoneやスマホを使用して外出先から操作できます' in dialog.pages.widget(0).layout().itemAt(1).widget().text()
+    dialog.use.click(); dialog.next.click()
+    assert dialog.pages.currentIndex()==1 and not dialog.next.isEnabled()
+    dialog.new.click(); dialog.name.clear()
+    assert not dialog.next.isEnabled()
+    dialog.name.setText('My server')
+    assert not dialog.next.isEnabled()
+    dialog.guidelines.click()
+    assert not dialog.next.isEnabled()
+    dialog.developer_terms.click()
+    assert dialog.next.isEnabled()
+    dialog.back.click(); dialog.skip.click(); dialog.next.click()
+    assert dialog.result()==QDialog.DialogCode.Accepted
+    assert not dialog.selection()['enabled']
+    canceled=DiscordSetupDialog(); canceled.reject()
+    assert canceled.result()==QDialog.DialogCode.Rejected
+    existing=DiscordSetupDialog(); existing.use.click(); existing.next.click(); existing.existing.click()
+    existing.developer_terms.click()
+    assert existing.next.isEnabled() and not existing.name.isEnabled()
+
+
+def test_skip_and_cancel_start_no_worker_and_skip_survives_restart(tmp_path,monkeypatch):
+    from PySide6.QtWidgets import QWidget
+    app=QApplication.instance() or QApplication([])
+    class Window(QWidget):
+        def __init__(self):
+            super().__init__(); self.store=Store(tmp_path)
+        def notify(self,*args): pass
+    window=Window(); panel=DiscordPanel(window,connect_on_start=False)
+    monkeypatch.setattr(DiscordSetupDialog,'exec',lambda self:QDialog.DialogCode.Rejected)
+    panel.setup()
+    assert window.store.setting('discord_onboarding',None) is None and panel.setup_worker is None
+    monkeypatch.setattr(DiscordSetupDialog,'exec',lambda self:QDialog.DialogCode.Accepted)
+    monkeypatch.setattr(DiscordSetupDialog,'selection',lambda self:{'enabled':False,'destination':'existing','server_name':'note管理'})
+    panel.setup()
+    assert panel.setup_worker is None and panel.bot is None
+    assert Store(tmp_path).setting('discord_enabled') is False
+    panel.poll.stop(); panel.shutdown()
+
+
+def test_checkbox_opens_same_setup_when_unconfigured_and_reconnects_when_configured(tmp_path,monkeypatch):
+    from PySide6.QtWidgets import QWidget
+    app=QApplication.instance() or QApplication([])
+    class Window(QWidget):
+        def __init__(self):
+            super().__init__(); self.store=Store(tmp_path)
+        def notify(self,*args): pass
+    window=Window(); panel=DiscordPanel(window,connect_on_start=False)
+    called=[]
+    monkeypatch.setattr(DiscordSetupDialog,'exec',lambda self:(called.append('same-dialog') or QDialog.DialogCode.Rejected))
+    panel.enabled.click()
+    assert called==['same-dialog'] and not panel.enabled.isChecked()
+    window.store.set_setting('discord_token','encrypted-placeholder')
+    window.store.set_setting('discord',{'guild':'123456789012345678'})
+    monkeypatch.setattr(panel,'connect_bot',lambda:called.append('connect'))
+    panel.enabled.click()
+    assert called==['same-dialog','connect'] and window.store.setting('discord_enabled')
+    panel.enabled.click()
+    assert not Store(tmp_path).setting('discord_enabled') and panel.bot is None
+    panel.poll.stop(); panel.shutdown()
+
+
+def test_discord_cli_status_never_discloses_secrets(tmp_path):
+    from note_stock.commands import Commands
+    store=Store(tmp_path)
+    store.set_setting('discord_token','never-disclose')
+    store.set_setting('discord',{'guild':'123456789012345678','channel':'234567890123456789'})
+    result=Commands(store).handle({'command':'discord'})
+    assert result['ok'] and result['result']['configured']
+    assert 'never-disclose' not in str(result)
+    assert not Commands(store).handle({'command':'discord','data':{'action':'setup'}})['ok']
