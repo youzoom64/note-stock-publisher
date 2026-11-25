@@ -122,6 +122,9 @@ class Store(RemoteStore):
             for name,definition in additions.items():
                 if name not in columns:
                     c.execute(f'ALTER TABLE posts ADD COLUMN {name} {definition}')
+            if 'tags_overridden' not in columns:
+                c.execute('ALTER TABLE posts ADD COLUMN tags_overridden INTEGER NOT NULL DEFAULT 0')
+                c.execute("UPDATE posts SET tags_overridden=1 WHERE native_ready=1 OR tags<>'[]'")
             c.execute("""CREATE TRIGGER IF NOT EXISTS article_preview_invalidate
                 AFTER UPDATE OF body,native_html,draft_key ON posts
                 WHEN OLD.body IS NOT NEW.body OR OLD.native_html IS NOT NEW.native_html
@@ -237,8 +240,8 @@ class Store(RemoteStore):
             document=source.get('native_document','{}')
             if not isinstance(document,str):
                 document=json.dumps(document,ensure_ascii=False)
-            c.execute('UPDATE posts SET editor_kind=?,native_html=?,native_document=? WHERE id=?',
-                      (source.get('editor_kind','native'),source.get('native_html',''),document,post_id))
+            c.execute('UPDATE posts SET editor_kind=?,native_html=?,native_document=?,tags_overridden=? WHERE id=?',
+                      (source.get('editor_kind','native'),source.get('native_html',''),document,int('tags' in source),post_id))
         return post_id
 
     def import_image(self, source):
@@ -294,7 +297,7 @@ class Store(RemoteStore):
                     native=self.native_template(post_id)
                     native['payload']['hashtags']=['#'+tag for tag in tags]
                     c.execute('UPDATE posts SET native_payload=? WHERE id=?',(protect(native),post_id))
-            c.execute("""UPDATE posts SET title=?,body=?,tags=?,image=?,status=?,due=?,error='',updated=? WHERE id=?""",
+            c.execute("""UPDATE posts SET title=?,body=?,tags=?,tags_overridden=1,image=?,status=?,due=?,error='',updated=? WHERE id=?""",
                       (title, body, json.dumps(tags, ensure_ascii=False), image, status,
                        due if status == "scheduled" else None, stamp, post_id))
             if append_to_queue and status=='queued':
@@ -590,8 +593,6 @@ class Store(RemoteStore):
         from .secrets import protect
         previous=edit_state or {}
         automatic_import=previous.get('_catalog_import',False)
-        if automatic_import and previous['tags']:
-            template={**template,'payload':{**template['payload'],'hashtags':['#'+tag for tag in previous['tags']]}}
         protected=protect(template)
         payload=template['payload']
         tags=tags_from_text(' '.join(payload.get('hashtags',[])))
@@ -612,15 +613,20 @@ class Store(RemoteStore):
         elif status not in {'queued','review','published','native_private'}:
             status,due='draft',None
         with self.connect() as c:
+            c.execute('BEGIN IMMEDIATE')
+            current=c.execute('SELECT updated,draft_key,tags,tags_overridden FROM posts WHERE id=?',(post_id,)).fetchone()
             if automatic_import:
-                c.execute('BEGIN IMMEDIATE')
-                current=c.execute('SELECT updated,draft_key FROM posts WHERE id=?',(post_id,)).fetchone()
                 if current is None or current['updated']!=previous['updated'] or current['draft_key']!=previous['draft_key']:
                     raise ValueError('取り込み中に記事の設定が変更されました。変更内容を保持しました。')
+            preserve=(automatic_import or previous.get('_preserve_app_tags',False)) and current['tags_overridden']
+            if preserve:
+                tags=json.loads(current['tags'])
+                template={**template,'payload':{**template['payload'],'hashtags':['#'+tag for tag in tags]}}
+                protected=protect(template)
             c.execute("""UPDATE posts SET editor_kind='native',native_ready=1,native_html=?,native_document=?,native_fingerprint=?,
-                  native_payload=?,native_owner=?,native_summary=?,title=?,body=?,tags=?,image='',status=?,due=?,error=?,updated=? WHERE id=?""",
+                  native_payload=?,native_owner=?,native_summary=?,title=?,body=?,tags=?,tags_overridden=?,image='',status=?,due=?,error=?,updated=? WHERE id=?""",
                 (html,json.dumps(snapshot['document'],ensure_ascii=False),snapshot['fingerprint'],protected,owner,json.dumps(summary,ensure_ascii=False),
-                   payload.get('name') or snapshot['title'],snapshot['text'],json.dumps(tags,ensure_ascii=False),status,due,message,stamp,post_id))
+                   payload.get('name') or snapshot['title'],snapshot['text'],json.dumps(tags,ensure_ascii=False),int(bool(preserve)),status,due,message,stamp,post_id))
             self.event(c,post_id,status,message or 'noteの本文・全素材・公開設定を取り込みました。投稿予定を保持し、まだ公開していません。',stamp)
 
     def native_template(self, post_id):

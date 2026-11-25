@@ -47,7 +47,8 @@ def test_save_records_key_before_native_save_leaves_editor_and_reopens_to_verify
             assert automatic
             adapter.page.goto('https://editor.note.com/notes/'+key+'/edit/')
             snapshot=content_snapshot(adapter.page)
-            store.capture_native(pid,{'account':'tester','key':key,'payload':{'name':snapshot['title'],'free_body':snapshot['html'],'status':'published'}},snapshot,post)
+            store.capture_native(pid,{'account':'tester','key':key,'payload':{'name':snapshot['title'],'free_body':snapshot['html'],'status':'published'}},
+                                 snapshot,{**post,'_preserve_app_tags':automatic})
             adapter.page.close()
         monkeypatch.setattr(adapter,'edit',capture)
         assert adapter.save_draft(store.get(pid))==key

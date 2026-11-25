@@ -138,15 +138,19 @@ class NativeNoteBrowser(NoteBrowser):
         prepared=self.store.begin_native_edit(post['id'])
         self.edit(prepared,automatic=True)
         # Desired tags are applied to the captured, full native payload.
-        self.update_tags(post['id'],post['tags'])
+        self.update_tags(post['id'],post['tags'],use_current=True)
         return key
 
-    def update_tags(self,pid,tags):
-        from .secrets import protect
-        template=self.store.native_template(pid)
-        template['payload']['hashtags']=['#'+tag for tag in tags]
+    def update_tags(self,pid,tags,*,use_current=False):
+        from .secrets import protect,unprotect
         with self.store.connect() as c:
-            c.execute('UPDATE posts SET tags=?,native_payload=? WHERE id=?',
+            c.execute('BEGIN IMMEDIATE')
+            current=c.execute('SELECT tags,native_payload FROM posts WHERE id=?',(pid,)).fetchone()
+            template=unprotect(current['native_payload'])
+            if use_current:
+                tags=json.loads(current['tags'])
+            template['payload']['hashtags']=['#'+tag for tag in tags]
+            c.execute('UPDATE posts SET tags=?,native_payload=?,tags_overridden=1 WHERE id=?',
                       (json.dumps(tags,ensure_ascii=False),protect(template),pid))
 
     def delete_article(self,post):
@@ -328,7 +332,8 @@ class NativeNoteBrowser(NoteBrowser):
                 snapshot=content_snapshot(inspector)
             finally:
                 inspector.close()
-            self.store.capture_native(post['id'],captured,snapshot,edit_state=post)
+            self.store.capture_native(post['id'],captured,snapshot,
+                                      edit_state={**post,'_preserve_app_tags':automatic})
             self.progress('装飾・本文素材・公開設定を取り込みました。まだ公開していません。')
             return key
         finally:
