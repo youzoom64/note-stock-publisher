@@ -15,7 +15,7 @@ from discord import app_commands
 from discord.ext import tasks
 from .remote import submit,request_selected_article
 from .secrets import unprotect
-from .store import JST, STATUSES, article_display_title, article_timestamp, now_ts
+from .store import JST, STATUSES, article_display_title, article_timestamp, posting_order_key, now_ts
 from .discord_commands import command_names,command_help
 from .discord_flow import flow,ManagedModal
 from .diagnostics import Diagnostics
@@ -657,14 +657,18 @@ class Articles(GuardView):
             stamp=article_timestamp(post,catalog)
             if post['status']=='published':stamp=max(stamp,published_at.get(post['id'],0))
             entries.append((post,stamp))
-        entries.sort(key=lambda row:(row[1],row[0]['created'],row[0]['id']),reverse=True)
+        if kind=='scheduled':
+            entries.sort(key=lambda row:posting_order_key(row[0],self.planned))
+        else:
+            entries.sort(key=lambda row:(row[1],row[0]['created'],row[0]['id']),reverse=True)
         self.total=len(entries);self.pages=max(1,(self.total+self.PAGE_SIZE-1)//self.PAGE_SIZE)
         self.page=max(0,min(page,self.pages-1));self.context=(kind,self.page,query)
         chosen=entries[self.page*self.PAGE_SIZE:(self.page+1)*self.PAGE_SIZE]
         self.selected=[post for post,_ in chosen]
         first=self.page*self.PAGE_SIZE+1;last=first+len(chosen)-1
         label={'all':'すべて','draft':'下書き','published':'公開済み','scheduled':'予約'}.get(kind,kind)
-        self.list_text=f'## 記事一覧\n{self.total}件 · {label} · 新しい順 · {self.PAGE_SIZE}件表示\n'
+        order_label='投稿予定順' if kind=='scheduled' else '新しい順'
+        self.list_text=f'## 記事一覧\n{self.total}件 · {label} · {order_label} · {self.PAGE_SIZE}件表示\n'
         self.list_text+=(f'{first}～{last}件目 / {self.page+1}／{self.pages}ページ' if chosen else '該当する記事はありません。')
         if query: self.list_text+='\n検索: '+discord.utils.escape_markdown(query)
         if chosen:self.list_text+='\n記事タイトルを押すと詳細が開きます。'

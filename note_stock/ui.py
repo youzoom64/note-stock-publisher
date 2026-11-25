@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
 
 from .platform import autostart_enabled, set_autostart
 from .publisher import account_id
-from .store import JST, LOCKED, STATUSES, Scheduler, article_timestamp, now_ts, tags_from_text
+from .store import JST, LOCKED, STATUSES, Scheduler, article_timestamp, posting_order_key, now_ts, tags_from_text
 from .store import DEFAULT_ARTICLE_SYNC_MINUTES, MIN_ARTICLE_SYNC_MINUTES, MAX_ARTICLE_SYNC_MINUTES
 from .worker import BrowserWorker
 from .preview import RichPreview
@@ -738,7 +738,7 @@ class MainWindow(QMainWindow):
             filters.addWidget(radio)
         filters.addStretch()
         self.filter_buttons[''].setChecked(True)
-        self.filter_group.idToggled.connect(lambda _, checked: checked and self.refresh_list())
+        self.filter_group.idToggled.connect(self.filter_changed)
         pane.addLayout(filters)
         self.import_button=button('noteの全記事を同期',self.import_drafts,True)
         pane.addWidget(self.import_button)
@@ -785,12 +785,14 @@ class MainWindow(QMainWindow):
         order.addStretch()
         self.order_group = QButtonGroup(left)
         self.order_buttons = {}
-        for key, name in (('manual', '手動順'), ('newest', '新しい順'), ('oldest', '古い順')):
+        for key, name in (('manual', '手動順'), ('newest', '新しい順'), ('oldest', '古い順'), ('planned','投稿予定順')):
             radio = QRadioButton(name)
             radio.setProperty('articleFilter', True)
             radio.setProperty('order', key)
             radio.setAccessibleName(f"記事の並べ替え: {name}")
-            if key != 'manual':
+            if key=='planned':
+                radio.setToolTip('投稿予定日時の早い順で並べ替えます。')
+            elif key != 'manual':
                 radio.setToolTip("noteの更新日時で並べ替えます。未同期の記事は登録日時を使います。")
             self.order_group.addButton(radio)
             self.order_buttons[key] = radio
@@ -1135,7 +1137,9 @@ class MainWindow(QMainWindow):
             visible = [p for p in posts if (not statuses or p["status"] in statuses) and
                        query in (p["title"] + "\n" + p["body"] + " " + " ".join(p["tags"])).casefold()]
             order = self.order_group.checkedButton().property('order')
-            if order != 'manual':
+            if order == 'planned':
+                visible.sort(key=lambda post:posting_order_key(post,planned))
+            elif order != 'manual':
                 visible.sort(key=lambda post: article_timestamp(post, post), reverse=order == 'newest')
             rows = []
             for p in visible:
@@ -1577,6 +1581,12 @@ class MainWindow(QMainWindow):
             self.refresh()
         except Exception as exc:
             self.fail(exc)
+
+    def filter_changed(self, identifier, checked):
+        if checked:
+            if self.filter_group.checkedButton().property('status')=='queued':
+                self.order_buttons['planned'].setChecked(True)
+            self.refresh_list()
 
     def order_changed(self, radio, checked):
         if checked:

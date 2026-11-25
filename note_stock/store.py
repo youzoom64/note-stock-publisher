@@ -34,6 +34,15 @@ def article_display_title(post, fallback='無題'):
     return ('📃 ' if post.get('native_ready') else '')+(post.get('title') or fallback)
 
 
+def posting_order_key(post, queue_schedule):
+    planned = None
+    if post['status'] in {'queued','scheduled','native_reserved','posting'}:
+        planned = post.get('due') or queue_schedule.get(post['id'])
+        if not planned and post['status']=='posting':
+            planned = post.get('updated')
+    return (planned if planned is not None else math.inf,post['position'],post['created'],post['id'])
+
+
 def article_timestamp(post, catalog):
     restored = post.get('draft_restored_at', 0) if post['status'] == 'draft' else 0
     value = catalog.get('remote_updated')

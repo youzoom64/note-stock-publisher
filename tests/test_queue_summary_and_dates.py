@@ -2,6 +2,7 @@ import asyncio
 from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+from PySide6.QtCore import Qt
 
 from note_stock.discord_bot import NoteClient, Articles, article_text
 from note_stock.store import Store, JST
@@ -90,16 +91,25 @@ def test_queue_dates_are_shown_in_gui_and_discord(tmp_path,qt_application,monkey
             store.save(pid,str(index),"本文",[],"","queued")
             ids.append(pid)
         plan=store.queue_schedule()
+        early=store.create({"editor_kind":"legacy","title":"日時指定","body":"本文"})
+        store.save(early,"日時指定","本文",[],"","scheduled",
+                   due=datetime(2026,12,1,8,30,tzinfo=JST).timestamp())
         assert datetime.fromtimestamp(plan[ids[0]],JST).strftime("%Y/%m/%d %H:%M")=="2026/12/01 09:30"
         assert datetime.fromtimestamp(plan[ids[1]],JST).strftime("%Y/%m/%d %H:%M")=="2026/12/02 09:30"
         client=NoteClient(store)
         listing=Articles(client,"scheduled")
+        assert [post["id"] for post in listing.selected]==[early]+ids
+        assert "投稿予定順" in listing.list_text
         labels=[button.label for button in article_buttons(listing.parts[0])]
         assert any("2026/12/01 09:30" in label for label in labels)
         assert "2026-12-02 09:30" in article_text(store,store.get(ids[1]))
         window=MainWindow(store,offline=True)
         try:
             window.show()
+            window.filter_buttons["queued"].click()
+            assert window.order_buttons["planned"].isChecked()
+            assert [window.list.item(i).data(Qt.ItemDataRole.UserRole)
+                    for i in range(window.list.count())]==[early]+ids
             window.load(ids[0])
             qt_application.processEvents()
             assert "2026/12/01 09:30" in window.planned_time_label.text()
