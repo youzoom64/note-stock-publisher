@@ -181,6 +181,11 @@ def test_tray_close_keeps_processing_and_icon_opens_window(screen,qt_application
     from PySide6.QtWidgets import QSystemTrayIcon
     store,window,_,_=screen
     window.enable_tray()
+    window.showMinimized()
+    qt_application.processEvents()
+    QTest.qWait(30)
+    assert window.isMinimized() and window.isVisible()
+    window.showNormal()
     window.close()
     qt_application.processEvents()
     assert not window.isVisible() and not window.quitting

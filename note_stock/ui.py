@@ -944,12 +944,6 @@ class MainWindow(QMainWindow):
         if reason in (QSystemTrayIcon.ActivationReason.Trigger,QSystemTrayIcon.ActivationReason.DoubleClick):
             self.show_normal()
 
-    def changeEvent(self,event):
-        if (event.type()==QEvent.Type.WindowStateChange and self.isMinimized()
-                and hasattr(self,'tray') and self.tray.isVisible()):
-            QTimer.singleShot(0,self.hide)
-        super().changeEvent(event)
-
     def busy(self):
         return bool(self.worker and self.worker.isRunning())
 

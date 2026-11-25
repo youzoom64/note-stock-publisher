@@ -81,13 +81,18 @@ def main():
         from types import SimpleNamespace
         application_root = app_folder().resolve()
         application_lock = QLockFile(str(application_root / 'application.lock'))
+        application_lock.setStaleLockTime(0)
         if not application_lock.tryLock(0):
+            if application_lock.error()!=QLockFile.LockError.LockFailedError:
+                raise RuntimeError('起動ロックを作成できません。保存先の書き込み権限を確認してください。')
             app = create_application(sys.argv[:1])
-            existing = request_running(application_root, {'command': 'activate','setup':args.setup_discord})
-            if existing and existing.get('ok'):
-                return 0
-            raise RuntimeError('noteストックはすでに起動しています。起動処理の完了をお待ちください。')
+            try:
+                request_running(application_root, {'command': 'activate','show':True,'setup':args.setup_discord})
+            except RuntimeError:
+                pass
+            return 0
         lock = QLockFile(str(data / "instance.lock"))
+        lock.setStaleLockTime(0)
         if not lock.tryLock(0):
             raise RuntimeError("このデータフォルダーを使うnoteストックは、すでに起動しています。")
         stage = 'open_store'
@@ -134,8 +139,7 @@ def main():
             window.show()
         else:
             window.enable_tray()
-            if args.setup_discord:
-                window.show_normal()
+            window.show_normal()
         stage = 'event_loop'
         result = app.exec()
         diagnostics.record('application_exit', code=result)
