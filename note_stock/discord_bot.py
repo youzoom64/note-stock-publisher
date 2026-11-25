@@ -100,7 +100,9 @@ def article_text(store,post,*,publish_checked=False):
         preparation=('\n本文・公開条件は操作時にnoteから読み込みます。' if post['draft_key']
                      else '\nnoteの下書きに保存すると予約できるようになります。')
     tags=('\nタグ: '+' '.join('#'+t for t in post['tags'])) if post['tags'] else ''
+    public_url=('\n公開URL: '+post['url']) if post['status']=='published' and post.get('url') else ''
     return (f"{article_display_title(post)}\nnote: {remote}\n管理: {STATUSES.get(post['status'],post['status'])}"
+            f"{public_url}"
             f"{reason}"
             f"\n予約: {due}（日本時間）\n価格: {price}"
             f"{tags}{preparation}\n\n{post['body'][:900]}")[:1800]

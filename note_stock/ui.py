@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from html import escape
 
 from PySide6.QtCore import Qt, QDate, QDateTime, QEvent, QTime, QTimeZone, QTimer, QSize, QUrl, QProcess, Signal
 from PySide6.QtGui import QColor, QDesktopServices, QIcon, QPainter, QPalette, QPixmap, QTextCharFormat, QAction, QKeySequence
@@ -824,6 +825,12 @@ class MainWindow(QMainWindow):
         self.recurrence_label = label("", "muted")
         self.recurrence_label.setWordWrap(True)
         self.posting_fields.addWidget(self.recurrence_label)
+        self.public_url_label = QLabel()
+        self.public_url_label.setTextFormat(Qt.TextFormat.RichText)
+        self.public_url_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
+        self.public_url_label.setOpenExternalLinks(True)
+        self.public_url_label.setWordWrap(True)
+        self.posting_fields.addWidget(self.public_url_label)
         self.error_label = label("")
         self.error_label.setWordWrap(True)
         self.error_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -995,6 +1002,11 @@ class MainWindow(QMainWindow):
 
     def refresh_controls(self):
         p = self.current or {}
+        public_url = p.get('url','') if p.get('status')=='published' else ''
+        self.public_url_label.setText(
+            f'公開URL <a href="{escape(public_url, quote=True)}">{escape(public_url)}</a>' if public_url else ''
+        )
+        self.public_url_label.setVisible(bool(public_url))
         progress=self.store.preview_job_state(p['id']) if p else None
         if p and getattr(getattr(self,'remote_controller',None),'catalog_import_post_id',None)==p['id']:
             progress='running'
@@ -1502,7 +1514,8 @@ class MainWindow(QMainWindow):
             self.timer.stop()
         if status=='prepared' and self.current_id and self.worker.post and self.worker.post['id']==self.current_id and not self.dirty:
             self.load(self.current_id)
-        self.notify(message, status not in {"published", "connected",'prepared','native_reserved','native_private','listed','imported'})
+        self.notify(message+('\n公開URL: '+url if status=='published' and url else ''),
+                    status not in {"published", "connected",'prepared','native_reserved','native_private','listed','imported'})
         self.refresh()
 
     def worker_finished(self):

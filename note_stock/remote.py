@@ -237,7 +237,7 @@ class RemoteController(QObject):
         if warning: self.window.notify(warning,True)
         if not automatic:
             self.window.note_action_required('')
-            self.window.notify(message,status not in SUCCESS)
+            self.window.notify(message+('\n公開URL: '+url if status=='published' and url else ''),status not in SUCCESS)
         pid=self.current['post_id']
         if pid and pid==self.window.current_id and not self.window.dirty:
             try:
