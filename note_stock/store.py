@@ -455,6 +455,34 @@ class Store(RemoteStore):
             cursor+=timedelta(days=1)
         return plan
 
+    def set_queue_order(self,post_ids,stamp=None):
+        stamp=now_ts() if stamp is None else stamp
+        if len(post_ids)!=len(set(post_ids)):
+            raise ValueError('同じ記事を重複して移動できません。')
+        with self.connect() as c:
+            c.execute('BEGIN IMMEDIATE')
+            plan=self.queue_schedule(stamp,connection=c)
+            if not set(post_ids).issubset(plan):
+                raise ValueError('キューの状態が変わりました。一覧を更新して移動し直してください。')
+            current=sorted(plan,key=plan.get)
+            moving=set(post_ids)
+            replacement=iter(post_ids)
+            ordered=[next(replacement) if pid in moving else pid for pid in current]
+            if current==ordered:
+                return
+            positions=sorted(c.execute('SELECT position FROM posts WHERE id=?',(pid,)).fetchone()['position']
+                             for pid in current)
+            dates=sorted(plan.values())
+            if any(moment<=stamp for moment in dates):
+                raise ValueError('期限を過ぎた割り込み日を変更してから並べ替えてください。')
+            for pid in current:
+                c.execute('DELETE FROM recurring_overrides WHERE post_id=?',(pid,))
+            for pid,position,moment in zip(ordered,positions,dates):
+                c.execute("UPDATE posts SET position=?,updated=? WHERE id=? AND status='queued'",
+                          (position,stamp,pid))
+                c.execute('INSERT INTO recurring_overrides(day,post_id) VALUES(?,?)',
+                          (datetime.fromtimestamp(moment,JST).date().isoformat(),pid))
+
     def claim(self, stamp, post_id=None, slot=None):
         with self.connect() as c:
             c.execute("BEGIN IMMEDIATE")

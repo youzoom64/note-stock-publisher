@@ -4,13 +4,14 @@ from datetime import datetime, timedelta
 from html import escape
 
 from PySide6.QtCore import Qt, QDate, QDateTime, QEvent, QTime, QTimeZone, QTimer, QSize, QUrl, QProcess, Signal
-from PySide6.QtGui import QColor, QDesktopServices, QIcon, QPainter, QPalette, QPixmap, QTextCharFormat, QAction, QKeySequence
+from PySide6.QtGui import QColor, QDesktopServices, QIcon, QPainter, QPalette, QPixmap, QTextCharFormat, QAction, QKeySequence, QDrag, QCursor
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QLineEdit, QPlainTextEdit, QComboBox, QListWidget, QListWidgetItem, QSplitter,
     QFormLayout, QCalendarWidget, QDateEdit, QDateTimeEdit, QDialog, QDialogButtonBox, QCheckBox,
     QMessageBox, QFrame, QScrollArea, QMenu, QTabWidget,
     QButtonGroup, QRadioButton, QSpinBox, QStyle, QStyledItemDelegate, QTableView, QToolButton, QStyleOptionViewItem, QSystemTrayIcon,
+    QAbstractItemView, QToolTip,
 )
 
 from .platform import autostart_enabled, set_autostart
@@ -45,6 +46,14 @@ ARTICLE_ROW_COLORS = {
     }.items()
     for status in ARTICLE_FILTERS[group][1]
 }
+ARTICLE_ROW_COLORS.update({'scheduled':'#DCC3AA','native_reserved':'#DCC3AA'})
+ARTICLE_LEGEND = (
+    ('draft','ストック',ARTICLE_FILTERS['draft'][1],ARTICLE_ROW_COLORS['draft']),
+    ('queued','キュー',frozenset({'queued','posting'}),ARTICLE_ROW_COLORS['queued']),
+    ('scheduled','日時指定',frozenset({'scheduled','native_reserved'}),ARTICLE_ROW_COLORS['scheduled']),
+    ('published','投稿済み',ARTICLE_FILTERS['published'][1],ARTICLE_ROW_COLORS['published']),
+    ('review','要確認',ARTICLE_FILTERS['review'][1],ARTICLE_ROW_COLORS['failed']),
+)
 
 STYLE = """
 QWidget {font-family:'Yu Gothic UI','Meiryo'; font-size:13px; color:#25342f;}
@@ -158,6 +167,73 @@ class ArticleRowDelegate(QStyledItemDelegate):
             painter.drawText(text_left, baseline, elided)
             baseline += metrics.height()
         painter.restore()
+
+
+class ArticleList(QListWidget):
+    queue_order_requested = Signal(list)
+
+    def __init__(self,parent=None):
+        super().__init__(parent)
+        self.dragged_id=None
+        self.drag_slots=[]
+        self.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self.setDropIndicatorShown(True)
+
+    def queued_ids(self):
+        return [self.item(index).data(Qt.ItemDataRole.UserRole) for index in range(self.count())
+                if self.item(index).data(Qt.ItemDataRole.UserRole+1)=='queued']
+
+    def order_at(self,point):
+        ordered=self.queued_ids()
+        if self.dragged_id not in ordered:
+            return None
+        row=self.indexAt(point).row()
+        boundary=self.count() if row<0 else row+(point.y()>self.visualItemRect(self.item(row)).center().y())
+        following=[self.item(index).data(Qt.ItemDataRole.UserRole) for index in range(boundary,self.count())
+                   if self.item(index).data(Qt.ItemDataRole.UserRole+1)=='queued'
+                   and self.item(index).data(Qt.ItemDataRole.UserRole)!=self.dragged_id]
+        ordered.remove(self.dragged_id)
+        target=ordered.index(following[0]) if following else len(ordered)
+        ordered.insert(target,self.dragged_id)
+        return ordered
+
+    def startDrag(self,actions):
+        self.dragged_id=self.currentItem().data(Qt.ItemDataRole.UserRole)
+        planned=self.window().store.queue_schedule()
+        self.drag_slots=sorted(planned[pid] for pid in self.queued_ids() if pid in planned)
+        try:
+            drag=QDrag(self)
+            drag.setMimeData(self.model().mimeData([self.indexFromItem(self.currentItem())]))
+            rect=self.visualItemRect(self.currentItem())
+            drag.setPixmap(self.viewport().grab(rect))
+            drag.setHotSpot(self.viewport().mapFromGlobal(QCursor.pos())-rect.topLeft())
+            drag.exec(Qt.DropAction.MoveAction)
+        finally:
+            self.dragged_id=None
+            self.drag_slots=[]
+            QToolTip.hideText()
+
+    def dragMoveEvent(self,event):
+        if event.source() is not self:
+            event.ignore()
+            return
+        ordered=self.order_at(event.position().toPoint())
+        if not ordered:
+            event.ignore()
+            return
+        event.acceptProposedAction()
+        target=ordered.index(self.dragged_id)
+        if target<len(self.drag_slots):
+            label='移動後の投稿予定 '+datetime.fromtimestamp(self.drag_slots[target],JST).strftime('%Y/%m/%d %H:%M')
+            QToolTip.showText(self.viewport().mapToGlobal(event.position().toPoint()),label,self)
+
+    def dropEvent(self,event):
+        ordered=self.order_at(event.position().toPoint()) if event.source() is self else None
+        if ordered:
+            self.queue_order_requested.emit(ordered)
+            event.acceptProposedAction()
+        else:
+            event.ignore()
 
 
 def icon():
@@ -684,12 +760,11 @@ class MainWindow(QMainWindow):
         legend.setContentsMargins(0, 0, 0, 0)
         legend.setSpacing(10)
         self.count_labels = {}
-        for key, name in (('draft', 'ストック'), ('queued', '投稿待ち'), ('published', '投稿済み'), ('review', '要確認')):
+        for key,name,_,color in ARTICLE_LEGEND:
             entry = QHBoxLayout()
             entry.setSpacing(4)
             swatch = QLabel()
             swatch.setFixedSize(14, 14)
-            color = ARTICLE_ROW_COLORS[next(iter(ARTICLE_FILTERS[key][1]))]
             swatch.setStyleSheet(f'background:{color}; border:1px solid #9aaba2; border-radius:2px;')
             swatch.setToolTip(name + 'の記事の背景色')
             entry.addWidget(swatch)
@@ -749,22 +824,26 @@ class MainWindow(QMainWindow):
         for b in (self.new_button, self.duplicate_button, self.delete_button):
             tools.addWidget(b)
         pane.addLayout(tools)
-        self.list = QListWidget()
+        self.list = ArticleList()
         self.list.setObjectName("posts")
         self.list.setItemDelegate(ArticleRowDelegate(self.list))
         self.list.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
         self.list.currentItemChanged.connect(self.selection_changed)
         self.list.itemDoubleClicked.connect(self.request_selected_article)
         self.list.itemChanged.connect(self.article_check_changed)
+        self.list.queue_order_requested.connect(self.apply_queue_order)
         checks = QHBoxLayout()
         self.check_all_button = button('全チェック',self.check_all_drafts)
         self.check_all_button.setToolTip('表示中の下書きとキューの記事をすべてチェックします。')
         self.clear_checks_button = button('チェック解除',self.clear_article_checks)
         self.queue_checked_button = button('キューへ追加 (0)',self.queue_checked_articles,True)
+        self.queue_checked_button.setProperty('cursorHelp','チェックした下書きを表示順に、現在のキューの後ろへ追加します。')
         self.queue_checked_button.setEnabled(False)
         self.interrupt_checked_button = button('割り込み',self.interrupt_checked_articles)
+        self.interrupt_checked_button.setProperty('cursorHelp','指定した日の投稿に割り込み、後続の記事を順番を保ったまま1日ずつ後ろへ送ります。')
         self.interrupt_checked_button.setEnabled(False)
         self.cancel_queue_button = button('キュー解除 (0)',self.cancel_checked_queue)
+        self.cancel_queue_button.setProperty('cursorHelp','チェックしたキュー記事を下書きへ戻します。')
         self.cancel_queue_button.setEnabled(False)
         for control in (self.check_all_button,self.clear_checks_button):
             checks.addWidget(control)
@@ -791,7 +870,7 @@ class MainWindow(QMainWindow):
             radio.setProperty('order', key)
             radio.setAccessibleName(f"記事の並べ替え: {name}")
             if key=='planned':
-                radio.setToolTip('投稿予定日時の早い順で並べ替えます。')
+                radio.setToolTip('投稿予定が早い順に表示します。黄色のキューはドラッグで順番を変更でき、茶色の日時指定は固定です。')
             elif key != 'manual':
                 radio.setToolTip("noteの更新日時で並べ替えます。未同期の記事は登録日時を使います。")
             self.order_group.addButton(radio)
@@ -1112,6 +1191,7 @@ class MainWindow(QMainWindow):
     def refresh_list(self, *_):
         try:
             posts = self.store.posts(with_catalog=True)
+            status_by_id = {post['id']:post['status'] for post in posts}
             planned = self.store.queue_schedule()
             self.check_statuses = {p['id']:p['status'] for p in posts if p['status'] in {'draft','queued'}}
             draft_ids = set(self.check_statuses)
@@ -1162,6 +1242,9 @@ class MainWindow(QMainWindow):
                 for pid, text, tooltip, color in rows:
                     item = QListWidgetItem(text)
                     item.setData(Qt.ItemDataRole.UserRole, pid)
+                    item.setData(Qt.ItemDataRole.UserRole+1,status_by_id[pid])
+                    if item.data(Qt.ItemDataRole.UserRole+1)!='queued':
+                        item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsDragEnabled)
                     if pid in draft_ids:
                         item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
                         item.setCheckState(Qt.CheckState.Checked if pid in self.checked_ids else Qt.CheckState.Unchecked)
@@ -1174,14 +1257,25 @@ class MainWindow(QMainWindow):
                 self.list.setCurrentItem(self.list.item(selected_row) if selected_row >= 0 else None)
             if scroll is not None:
                 restore_scroll(self.list,scroll,keep_bottom=False)
-            for key, name in (('draft', 'ストック'), ('queued', '投稿待ち'), ('published', '投稿済み'), ('review', '要確認')):
-                statuses = ARTICLE_FILTERS[key][1]
+            for key,name,statuses,_ in ARTICLE_LEGEND:
                 self.count_labels[key].setText(f"{name} {sum(p['status'] in statuses for p in posts)}")
         except Exception as exc:
             self.fail(exc)
         finally:
             self.list.blockSignals(False)
             self.update_check_controls()
+            reorderable=(self.filter_group.checkedButton().property('status')=='queued'
+                         and self.order_buttons['planned'].isChecked())
+            self.list.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove if reorderable
+                                      else QAbstractItemView.DragDropMode.NoDragDrop)
+
+    def apply_queue_order(self,post_ids):
+        try:
+            self.store.set_queue_order(post_ids)
+        except Exception as exc:
+            self.fail(exc)
+        self._displayed_rows=None
+        self.refresh()
 
     def update_check_controls(self):
         count = len(self.checked_ids)

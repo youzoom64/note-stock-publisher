@@ -12,7 +12,8 @@ BUTTON_HELP = {
     '自動投稿を一時停止': '新しい自動投稿の開始を止めます。処理中の投稿は結果確認まで続きます。',
     'すべて': 'すべての状態の記事を一覧に表示します。',
     '下書き': '下書きの記事だけを表示します。',
-    '投稿待ち': '日時指定または定期投稿を待っている記事だけを表示します。',
+    '投稿待ち': '投稿予定順で表示します。黄色のキューはドラッグで順番を変更でき、茶色の日時指定は固定です。',
+    '投稿予定順': '投稿予定が早い順に表示します。キューはドラッグで順番を変更でき、移動後の投稿日時も確認できます。',
     '投稿済み': '公開済みの記事だけを表示します。',
     '非公開': '非公開の記事だけを表示します。',
     '要確認': '投稿結果などの確認が必要な記事だけを表示します。',
@@ -126,8 +127,15 @@ class CursorHelp(QObject):
                 return ''
             if isinstance(widget,QListWidget) and widget.objectName()=='posts':
                 point=widget.viewport().mapFromGlobal(QCursor.pos())
-                return ('記事の行をダブルクリックすると、noteから本文を読み込みます。'
-                        if widget.viewport().rect().contains(point) and widget.itemAt(point) else '')
+                item=widget.itemAt(point)
+                if not widget.viewport().rect().contains(point) or item is None:
+                    return ''
+                status=item.data(Qt.ItemDataRole.UserRole+1)
+                if status in {'scheduled','native_reserved'}:
+                    return '茶色は日時指定の記事です。投稿日時が固定されており、ドラッグでは移動できません。'
+                if status=='queued':
+                    return '「投稿待ち」を「投稿予定順」で表示すると、黄色のキューをドラッグして投稿順を変更できます。茶色の日時指定は固定です。'
+                return '記事の行をダブルクリックすると、noteから本文を読み込みます。'
             custom=widget.property('cursorHelp') or widget.toolTip()
             if custom:
                 return str(custom)
@@ -159,6 +167,9 @@ class CursorHelp(QObject):
         return ''
 
     def update(self):
+        if getattr(getattr(self.window,'list',None),'dragged_id',None) is not None:
+            self.bubble.hide()
+            return
         active=QApplication.activeWindow()
         popup=QApplication.activePopupWidget()
         if not self.window.isVisible() or not self.belongs_to_window(popup or active):
