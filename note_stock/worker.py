@@ -28,6 +28,8 @@ class BrowserWorker(QThread):
         self.headless_sync=False
         self.catalog_import=False
         self.background_read=False
+        self.append_to_queue=False
+        self.interrupt_day=None
 
     def run(self):
         capture_catalog_draft = (self.action=='save_note_draft' and self.post
@@ -136,10 +138,13 @@ class BrowserWorker(QThread):
                             self.store.set_schedule(self.post['id'],self.import_due)
                         elif self.items==['queue']:
                             current=self.store.get(self.post['id'])
-                            self.store.save(current['id'],current['title'],current['body'],current['tags'],current['image'],'queued')
+                            self.store.save(current['id'],current['title'],current['body'],current['tags'],current['image'],'queued',
+                                            append_to_queue=self.append_to_queue,interrupt_day=self.interrupt_day)
                         status,message,url='saved','noteへの下書き保存と再読込を確認しました。',''
                         if self.items==['queue']:
                             message='下書きの保存と再読込を確認し、定期投稿のキューへ追加しました。'
+                            if self.interrupt_day:
+                                message=self.interrupt_day+'の投稿に割り込み、後続を翌日以降へ送りました。'
                     elif self.action=='preview_article':
                         adapter.read_article_preview(self.post)
                         status,message,url='saved','本文プレビューを読み込みました。',''

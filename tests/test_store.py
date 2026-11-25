@@ -141,7 +141,7 @@ def test_recurring_override_moves_each_queued_post_one_daily_slot_later(store):
     assert reopened.recurring_override(priority) is None
 
 
-def test_recurring_override_waits_for_its_day_and_rejects_duplicate_or_non_recurring_day(store):
+def test_recurring_override_waits_for_its_day_is_idempotent_and_rejects_non_recurring_day(store):
     ready(store)
     store.set_setting('recurrence',{'days':[0,2],'time':'09:00'})
     monday=datetime(2026,11,23,9,0,tzinfo=JST).timestamp()
@@ -149,8 +149,7 @@ def test_recurring_override_waits_for_its_day_and_rejects_duplicate_or_non_recur
     with pytest.raises(ValueError,match='定期投稿の日'):
         store.set_recurring_override(priority,'2026-11-24',stamp=monday-60)
     store.set_recurring_override(priority,'2026-11-25',stamp=monday-60)
-    with pytest.raises(ValueError,match='別の記事'):
-        store.set_recurring_override(first,'2026-11-25',stamp=monday-60)
+    store.set_recurring_override(priority,'2026-11-25',stamp=monday-60)
     assert Scheduler(store,monday-1).tick(monday)['id']==first
     store.finish(first,'published')
     store.set_recurring_override(priority,None)

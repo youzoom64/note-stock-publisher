@@ -254,7 +254,7 @@ class Store(RemoteStore):
             raise ValueError("見出し画像が見つかりません。画像を選び直してください。")
         return target
 
-    def save(self, post_id, title, body, tags, image, status, due=None, stamp=None):
+    def save(self, post_id, title, body, tags, image, status, due=None, stamp=None, *, append_to_queue=False, interrupt_day=None):
         stamp = now_ts() if stamp is None else stamp
         native_title,native_body=title,body
         if status not in {"draft", "queued", "scheduled"}:
@@ -288,6 +288,11 @@ class Store(RemoteStore):
             c.execute("""UPDATE posts SET title=?,body=?,tags=?,image=?,status=?,due=?,error='',updated=? WHERE id=?""",
                       (title, body, json.dumps(tags, ensure_ascii=False), image, status,
                        due if status == "scheduled" else None, stamp, post_id))
+            if append_to_queue and status=='queued':
+                c.execute("UPDATE posts SET position=(SELECT COALESCE(MAX(position),0)+1 FROM posts) WHERE id=?",
+                          (post_id,))
+            if interrupt_day and status=='queued':
+                self._set_recurring_override(c,post_id,interrupt_day,stamp)
         from .diagnostics import Diagnostics
         return Diagnostics(self).record("draft_saved", post_id=post_id, status=status, database=str(self.db), table="posts")
 
@@ -370,26 +375,60 @@ class Store(RemoteStore):
             with self.connect() as c:
                 c.execute('DELETE FROM recurring_overrides WHERE post_id=?',(post_id,))
             return
+        with self.connect() as c:
+            c.execute('BEGIN IMMEDIATE')
+            self._set_recurring_override(c,post_id,day,stamp)
+
+    def _set_recurring_override(self,c,post_id,day,stamp):
         day = date.fromisoformat(day)
         recurrence = self.setting('recurrence',{'days':list(range(7)), 'time':'09:00'})
         when = datetime.combine(day,datetime.strptime(recurrence['time'],'%H:%M').time(),tzinfo=JST)
         if day.weekday() not in recurrence['days'] or when.timestamp() <= stamp:
             raise ValueError('まだ実行されていない定期投稿の日を選んでください。')
-        with self.connect() as c:
-            c.execute('BEGIN IMMEDIATE')
-            self.require_schedulable(post_id,connection=c)
-            row=c.execute('SELECT status,editor_kind,native_ready,draft_key FROM posts WHERE id=?',(post_id,)).fetchone()
-            if row['status']!='queued':
-                raise ValueError('先にこの記事を定期投稿のキューに入れてください。')
-            if row['editor_kind']=='native' and not (row['native_ready'] and row['draft_key']):
-                raise ValueError('noteの本文と公開条件を確認してから差し込んでください。')
-            if c.execute('SELECT 1 FROM slots WHERE key=?',(when.isoformat(),)).fetchone():
-                raise ValueError('この日の定期投稿枠はすでに使われています。')
-            existing=c.execute('SELECT post_id FROM recurring_overrides WHERE day=?',(day.isoformat(),)).fetchone()
-            if existing and existing['post_id']!=post_id:
-                raise ValueError('この日には別の記事が差し込まれています。')
-            c.execute('INSERT INTO recurring_overrides VALUES(?,?) ON CONFLICT(post_id) DO UPDATE SET day=excluded.day',
-                      (day.isoformat(),post_id))
+        self.require_schedulable(post_id,connection=c)
+        row=c.execute('SELECT status,editor_kind,native_ready,draft_key FROM posts WHERE id=?',(post_id,)).fetchone()
+        if row['status']!='queued':
+            raise ValueError('先にこの記事を定期投稿のキューに入れてください。')
+        if row['editor_kind']=='native' and not (row['native_ready'] and row['draft_key']):
+            raise ValueError('noteの本文と公開条件を確認してから差し込んでください。')
+        if c.execute('SELECT 1 FROM slots WHERE key=?',(when.isoformat(),)).fetchone():
+            raise ValueError('この日の定期投稿枠はすでに使われています。')
+        previous=c.execute('SELECT day FROM recurring_overrides WHERE post_id=?',(post_id,)).fetchone()
+        if previous and previous['day']==day.isoformat():
+            return
+        c.execute('DELETE FROM recurring_overrides WHERE post_id=?',(post_id,))
+        queued=c.execute("SELECT id FROM posts WHERE status='queued' AND id<>? ORDER BY position,created",
+                         (post_id,)).fetchall()
+        queued_ids={row['id'] for row in queued}
+        today=datetime.fromtimestamp(stamp,JST).date()
+        fixed={date.fromisoformat(row['day']):row['post_id'] for row in c.execute(
+            'SELECT day,post_id FROM recurring_overrides WHERE day>=?',(today.isoformat(),))
+            if row['post_id'] in queued_ids}
+        fixed_ids=set(fixed.values())
+        normal=iter(row['id'] for row in queued if row['id'] not in fixed_ids)
+        next_normal=next(normal,None)
+        cursor=today
+        plan=[]
+        while next_normal is not None or fixed:
+            moment=datetime.combine(cursor,when.timetz())
+            if moment.timestamp()>stamp:
+                chosen=fixed.pop(cursor,None)
+                if chosen is None and cursor.weekday() in recurrence['days']:
+                    chosen=next_normal
+                    next_normal=next(normal,None)
+                if chosen:
+                    plan.append((cursor,chosen))
+            else:
+                expired=fixed.pop(cursor,None)
+                if expired:
+                    plan.append((cursor,expired))
+            cursor+=timedelta(days=1)
+        following=[(scheduled+timedelta(days=1),pid) for scheduled,pid in plan if scheduled>=day]
+        for _,pid in following:
+            c.execute('DELETE FROM recurring_overrides WHERE post_id=?',(pid,))
+        for shifted,pid in following:
+            c.execute('INSERT INTO recurring_overrides VALUES(?,?)',(shifted.isoformat(),pid))
+        c.execute('INSERT INTO recurring_overrides VALUES(?,?)',(day.isoformat(),post_id))
 
     def claim(self, stamp, post_id=None, slot=None):
         with self.connect() as c:
@@ -581,9 +620,12 @@ class Scheduler:
         local = datetime.fromtimestamp(stamp, JST)
         minute = local.replace(second=0, microsecond=0)
         schedule = self.store.setting("recurrence", {"days": list(range(7)), "time": "09:00"})
-        if (local.weekday() in schedule["days"] and local.strftime("%H:%M") == schedule["time"]
-                and before < minute.timestamp() <= stamp):
-            self.pending_slot = minute.isoformat()
+        if local.strftime("%H:%M") == schedule["time"] and before < minute.timestamp() <= stamp:
+            with self.store.connect() as c:
+                override=c.execute("SELECT 1 FROM recurring_overrides o JOIN posts p ON p.id=o.post_id "
+                                   "WHERE o.day=? AND p.status='queued'",(local.date().isoformat(),)).fetchone()
+            if local.weekday() in schedule["days"] or override:
+                self.pending_slot = minute.isoformat()
         if busy:
             return None
         item = self.store.claim(stamp, slot=self.pending_slot)

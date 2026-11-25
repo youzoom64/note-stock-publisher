@@ -83,7 +83,7 @@ def main():
         application_lock = QLockFile(str(application_root / 'application.lock'))
         if not application_lock.tryLock(0):
             app = create_application(sys.argv[:1])
-            existing = request_running(application_root, {'command': 'activate'})
+            existing = request_running(application_root, {'command': 'activate','setup':args.setup_discord})
             if existing and existing.get('ok'):
                 return 0
             raise RuntimeError('noteストックはすでに起動しています。起動処理の完了をお待ちください。')
@@ -110,22 +110,32 @@ def main():
         app.setStyleSheet(STYLE)
         window = MainWindow(store,offline=args.smoke_test)
         def activate(request):
+            if request.get('command') == 'quit':
+                QTimer.singleShot(0,window.quit_app)
+                return {'ok': True}
             if request.get('command') != 'activate':
                 raise ValueError('未対応の操作です。')
-            window.show_normal()
+            if request.get('setup'):
+                window.startup_setup_pending=True
+                window.show_normal()
+            elif request.get('show'):
+                window.show_normal()
             return {'ok': True}
         activation_server = CommandServer(SimpleNamespace(root=application_root), activate, window)
-        if not args.smoke_test and (args.setup_discord or (
-                store.setting('discord_onboarding',None) is None and not store.setting('discord_token',''))):
-            window.tabs.setCurrentWidget(window.discord_panel)
-            QTimer.singleShot(500,window.discord_panel.setup)
+        window.startup_setup_pending=not args.smoke_test and (args.setup_discord or (
+                store.setting('discord_onboarding',None) is None and not store.setting('discord_token','')))
         if log_warning:
             window.notify(log_warning, True)
         if args.smoke_test:
             window.timer.stop()
             (data / 'gui-smoke.txt').write_text('GUI startup passed', encoding='utf-8')
             QTimer.singleShot(1200, app.quit)
-        window.show()
+        if args.smoke_test:
+            window.show()
+        else:
+            window.enable_tray()
+            if args.setup_discord:
+                window.show_normal()
         stage = 'event_loop'
         result = app.exec()
         diagnostics.record('application_exit', code=result)

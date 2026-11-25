@@ -1,4 +1,5 @@
 from contextlib import contextmanager
+from datetime import datetime, timedelta
 from unittest.mock import Mock
 
 import pytest
@@ -9,7 +10,7 @@ from PySide6.QtWidgets import QApplication, QStyle, QStyleOptionViewItem
 
 from note_stock.clock_picker import PostingTimeDialog
 from note_stock.remote import submit
-from note_stock.store import Store
+from note_stock.store import Store, Scheduler, JST
 from note_stock.ui import MainWindow, SettingsDialog
 from note_stock.worker import BrowserWorker
 
@@ -113,9 +114,79 @@ def test_queue_worker_finishes_in_queue_with_existing_save_path(tmp_path, monkey
     monkeypatch.setattr("note_stock.headless_sync.open_note_session", session)
     worker = BrowserWorker(store, "save_note_draft", store.get(pid))
     worker.items = ["queue"]
+    worker.append_to_queue = True
     worker.run()
     assert store.get(pid)["status"] == "queued"
     assert store.get(pid)["image"] == stored_cover
+
+
+def test_bulk_receipt_follows_displayed_order(screen):
+    store,window,ids,_=screen
+    for index,pid in enumerate(ids):
+        with store.connect() as c:
+            c.execute("UPDATE posts SET created=? WHERE id=?",(300-index*100,pid))
+    window.order_buttons["oldest"].setChecked(True)
+    window.refresh_list()
+    window.check_all_drafts()
+    window.queue_checked_articles()
+    sequence=[]
+    while True:
+        job=store.next_job()
+        if not job:
+            break
+        sequence.append(job["post_id"])
+        store.complete_job(job["id"],True,"受け付け")
+    assert sequence==ids[::-1]
+
+
+def test_interruption_shifts_every_following_article_by_one_calendar_day(tmp_path):
+    store=Store(tmp_path)
+    store.set_setting("account","tester")
+    store.set_setting("paused",False)
+    store.set_setting("recurrence",{"days":list(range(7)),"time":"09:00"})
+    def queued(title):
+        pid=store.create({"editor_kind":"legacy","title":title,"body":"本文"})
+        store.save(pid,title,"本文",[],"","queued",append_to_queue=True)
+        return pid
+    first,second,third,inserted=[queued(title) for title in ("A","B","C","割り込み")]
+    start=datetime(2026,12,1,9,0,tzinfo=JST)
+    store.set_recurring_override(inserted,"2026-12-01",stamp=start.timestamp()-60)
+    assert store.recurring_override(first)=="2026-12-02"
+    assert store.recurring_override(second)=="2026-12-03"
+    assert store.recurring_override(third)=="2026-12-04"
+    for offset,pid in enumerate((inserted,first,second,third)):
+        stamp=(start+timedelta(days=offset)).timestamp()
+        assert Scheduler(store,stamp-1).tick(stamp)["id"]==pid
+        store.finish(pid,"published")
+
+
+def test_queue_cancellation_returns_selected_items_to_drafts(screen):
+    store,window,ids,_=screen
+    for pid in ids:
+        post=store.get(pid)
+        with store.connect() as c:
+            c.execute("UPDATE posts SET editor_kind='legacy' WHERE id=?",(pid,))
+        store.save(pid,post["title"],post["body"],post["tags"],"","queued")
+    window.refresh()
+    window.check_all_drafts()
+    assert window.cancel_queue_button.isEnabled()
+    window.cancel_queue_button.click()
+    assert all(store.get(pid)["status"]=="draft" for pid in ids)
+    assert not window.checked_ids
+
+
+def test_tray_close_keeps_processing_and_icon_opens_window(screen,qt_application):
+    from PySide6.QtWidgets import QSystemTrayIcon
+    store,window,_,_=screen
+    window.enable_tray()
+    window.close()
+    qt_application.processEvents()
+    assert not window.isVisible() and not window.quitting
+    assert window.timer.isActive() and window.tray.isVisible()
+    window.tray_activated(QSystemTrayIcon.ActivationReason.Trigger)
+    qt_application.processEvents()
+    assert window.isVisible()
+    window.tray.hide()
 
 
 @pytest.mark.parametrize("accepted", [True, False])

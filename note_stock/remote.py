@@ -134,6 +134,12 @@ class RemoteController(QObject):
                 self.finish('saved','予約を取り消しました。noteの記事は残っています。','')
                 return
             post=self.store.get(pid) if pid else None
+            if data.get('queue_only'):
+                if post['status']!='queued':
+                    raise ValueError('この記事はキューから外れています。')
+                self.store.set_recurring_override(pid,data['interrupt_day'])
+                self.finish('saved','指定日の投稿に割り込み、後続を翌日以降へ送りました。','')
+                return
             if data.get('draft_queue'):
                 if post['status']!='draft':
                     raise ValueError('受付後に下書きの状態が変わりました。記事を確認してください。')
@@ -171,6 +177,8 @@ class RemoteController(QObject):
             self.worker.background_read=bool(data.get('background_read'))
             self.worker.headless_sync=self.background_sync
             self.worker.items=['queue'] if data.get('queue') else data.get('tags',[])
+            self.worker.append_to_queue=bool(data.get('draft_queue'))
+            self.worker.interrupt_day=data.get('interrupt_day')
             self.worker.import_due=data.get('due')
             self.window.worker=self.worker
             if not self.background_sync:

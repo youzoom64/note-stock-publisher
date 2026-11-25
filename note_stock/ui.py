@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (
     QLineEdit, QPlainTextEdit, QComboBox, QListWidget, QListWidgetItem, QSplitter,
     QFormLayout, QCalendarWidget, QDateEdit, QDateTimeEdit, QDialog, QDialogButtonBox, QCheckBox,
     QMessageBox, QFrame, QScrollArea, QMenu, QTabWidget,
-    QButtonGroup, QRadioButton, QSpinBox, QStyle, QStyledItemDelegate, QTableView, QToolButton, QStyleOptionViewItem,
+    QButtonGroup, QRadioButton, QSpinBox, QStyle, QStyledItemDelegate, QTableView, QToolButton, QStyleOptionViewItem, QSystemTrayIcon,
 )
 
 from .platform import autostart_enabled, set_autostart
@@ -758,13 +758,22 @@ class MainWindow(QMainWindow):
         self.list.itemChanged.connect(self.article_check_changed)
         checks = QHBoxLayout()
         self.check_all_button = button('全チェック',self.check_all_drafts)
-        self.check_all_button.setToolTip('表示中の下書きをすべてチェックします。')
+        self.check_all_button.setToolTip('表示中の下書きとキューの記事をすべてチェックします。')
         self.clear_checks_button = button('チェック解除',self.clear_article_checks)
         self.queue_checked_button = button('キューへ追加 (0)',self.queue_checked_articles,True)
         self.queue_checked_button.setEnabled(False)
-        for control in (self.check_all_button,self.clear_checks_button,self.queue_checked_button):
+        self.interrupt_checked_button = button('割り込み',self.interrupt_checked_articles)
+        self.interrupt_checked_button.setEnabled(False)
+        self.cancel_queue_button = button('キュー解除 (0)',self.cancel_checked_queue)
+        self.cancel_queue_button.setEnabled(False)
+        for control in (self.check_all_button,self.clear_checks_button):
             checks.addWidget(control)
+        checks.addStretch()
         pane.addLayout(checks)
+        queue_actions = QHBoxLayout()
+        for control in (self.queue_checked_button,self.interrupt_checked_button,self.cancel_queue_button):
+            queue_actions.addWidget(control)
+        pane.addLayout(queue_actions)
         pane.addWidget(self.list, 1)
         order = QHBoxLayout()
         self.move_up = button("↑ 上へ", lambda: self.reorder(-1))
@@ -908,6 +917,32 @@ class MainWindow(QMainWindow):
         self.showNormal()
         self.raise_()
         self.activateWindow()
+        if getattr(self,'startup_setup_pending',False):
+            self.startup_setup_pending = False
+            self.tabs.setCurrentWidget(self.discord_panel)
+            QTimer.singleShot(0,self.discord_panel.setup)
+
+    def enable_tray(self):
+        self.tray = QSystemTrayIcon(self.windowIcon(),self)
+        self.tray.setToolTip('noteストック')
+        menu = QMenu(self)
+        menu.addAction('開く',self.show_normal)
+        menu.addSeparator()
+        menu.addAction('終了',self.quit_app)
+        self.tray.setContextMenu(menu)
+        self.tray_menu = menu
+        self.tray.activated.connect(self.tray_activated)
+        self.tray.show()
+
+    def tray_activated(self,reason):
+        if reason in (QSystemTrayIcon.ActivationReason.Trigger,QSystemTrayIcon.ActivationReason.DoubleClick):
+            self.show_normal()
+
+    def changeEvent(self,event):
+        if (event.type()==QEvent.Type.WindowStateChange and self.isMinimized()
+                and hasattr(self,'tray') and self.tray.isVisible()):
+            QTimer.singleShot(0,self.hide)
+        super().changeEvent(event)
 
     def busy(self):
         return bool(self.worker and self.worker.isRunning())
@@ -1073,7 +1108,8 @@ class MainWindow(QMainWindow):
     def refresh_list(self, *_):
         try:
             posts = self.store.posts(with_catalog=True)
-            draft_ids = {p['id'] for p in posts if p['status']=='draft'}
+            self.check_statuses = {p['id']:p['status'] for p in posts if p['status'] in {'draft','queued'}}
+            draft_ids = set(self.check_statuses)
             self.checked_ids.intersection_update(draft_ids)
             with self.store.connect() as connection:
                 reading = {row['post_id'] for row in connection.execute(
@@ -1140,9 +1176,14 @@ class MainWindow(QMainWindow):
 
     def update_check_controls(self):
         count = len(self.checked_ids)
-        self.queue_checked_button.setText(f'キューへ追加 ({count})')
-        self.queue_checked_button.setEnabled(bool(count))
+        drafts = sum(self.check_statuses.get(pid)=='draft' for pid in self.checked_ids)
+        queued = sum(self.check_statuses.get(pid)=='queued' for pid in self.checked_ids)
+        self.queue_checked_button.setText(f'キューへ追加 ({drafts})')
+        self.queue_checked_button.setEnabled(bool(drafts))
         self.clear_checks_button.setEnabled(bool(count))
+        self.interrupt_checked_button.setEnabled(bool(count))
+        self.cancel_queue_button.setText(f'キュー解除 ({queued})')
+        self.cancel_queue_button.setEnabled(bool(queued))
 
     def article_check_changed(self,item):
         pid = item.data(Qt.ItemDataRole.UserRole)
@@ -1167,16 +1208,73 @@ class MainWindow(QMainWindow):
         self.update_check_controls()
 
     def queue_checked_articles(self):
+        self.enqueue_checked_articles()
+
+    def cancel_checked_queue(self):
+        if not self.can_leave():
+            return
+        removed = []
+        errors = []
+        for pid in list(self.checked_ids):
+            try:
+                post = self.store.get(pid)
+                if post['status']!='queued':
+                    continue
+                self.store.set_schedule(pid,None)
+                removed.append(pid)
+            except Exception as exc:
+                errors.append(f'{pid}: {exc}')
+        self.checked_ids.difference_update(removed)
+        self._displayed_rows = None
+        self.refresh()
+        self.notify(f'{len(removed)}件をキューから解除しました。'
+                    + ('\n'+'\n'.join(errors) if errors else ''),bool(errors))
+
+    def interrupt_checked_articles(self):
+        if not self.checked_ids:
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle('キューへの割り込み')
+        layout = QVBoxLayout(dialog)
+        guide = label('選んだ日から、チェックした記事を表示順に1日1本ずつ投稿します。\n'
+                      'その日以降の記事は順番を保って後ろへずれます。')
+        guide.setWordWrap(True)
+        layout.addWidget(guide)
+        picker = QDateEdit()
+        enable_calendar_popup(picker)
+        picker.setDisplayFormat('yyyy/MM/dd')
+        tomorrow = QDate.currentDate().addDays(1)
+        picker.setMinimumDate(QDate.currentDate())
+        picker.setDate(tomorrow)
+        layout.addWidget(picker)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok|QDialogButtonBox.StandardButton.Cancel)
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText('この日から割り込む')
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if dialog.exec()==QDialog.DialogCode.Accepted:
+            self.enqueue_checked_articles(picker.date().toString('yyyy-MM-dd'))
+
+    def enqueue_checked_articles(self,interrupt_day=None):
         if not self.checked_ids or not self.can_leave():
             return
         from .remote import submit
         accepted = []
         errors = []
         posts = {post['id']:post for post in self.store.posts()}
-        ordered = sorted(self.checked_ids,key=lambda pid:posts.get(pid,{}).get('position',float('inf')))
+        displayed = [self.list.item(index).data(Qt.ItemDataRole.UserRole) for index in range(self.list.count())]
+        ordered = [pid for pid in displayed if pid in self.checked_ids]
+        ordered.extend(pid for pid in self.checked_ids if pid not in displayed)
         for pid in ordered:
             try:
-                submit(self.store,'save_note_draft',pid,{'queue':True,'draft_queue':True})
+                queued = posts.get(pid,{}).get('status')=='queued'
+                if queued and not interrupt_day:
+                    continue
+                data = {'queue':True,'queue_only':True} if queued else {'queue':True,'draft_queue':True}
+                if interrupt_day:
+                    start = datetime.strptime(interrupt_day,'%Y-%m-%d')
+                    data['interrupt_day'] = (start+timedelta(days=len(accepted))).strftime('%Y-%m-%d')
+                submit(self.store,'save_note_draft',pid,data)
                 accepted.append(pid)
             except Exception as exc:
                 errors.append(f"{posts.get(pid,{}).get('title',pid)}: {exc}")
@@ -1189,6 +1287,8 @@ class MainWindow(QMainWindow):
     def refresh(self):
         self.refresh_list()
         paused = self.store.setting("paused", True)
+        if hasattr(self,'tray'):
+            self.tray.setToolTip('noteストック\n自動投稿 '+('一時停止中' if paused else '動作中'))
         self.pause_button.setText("自動投稿を開始" if paused else "自動投稿を一時停止")
         verified=self.store.setting("account_verified",False)
         self.account_label.setText((self.store.setting("account", "") or "未接続") + (" · 接続確認済み" if verified else ""))
@@ -1657,7 +1757,11 @@ class MainWindow(QMainWindow):
             event.accept()
             return
         event.ignore()
-        self.quit_app()
+        if hasattr(self,'tray') and self.tray.isVisible():
+            if self.persist_layout():
+                self.hide()
+        else:
+            self.quit_app()
 
     def quit_app(self):
         if self.busy() and self.worker.action=='edit':
@@ -1708,5 +1812,7 @@ class MainWindow(QMainWindow):
         if hasattr(self,'discord_panel') and not self.discord_panel.shutdown():
             QTimer.singleShot(500,self.final_exit)
             return
+        if hasattr(self,'tray'):
+            self.tray.hide()
         self.close()
         QApplication.instance().quit()

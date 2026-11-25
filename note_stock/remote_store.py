@@ -55,17 +55,25 @@ class RemoteStore:
             row=c.execute('SELECT id FROM jobs WHERE request_key=?',(key,)).fetchone()
             if row:
                 return row['id']
-            if (data or {}).get('draft_queue'):
+            if (data or {}).get('draft_queue') or (data or {}).get('queue_only'):
                 post=c.execute('SELECT status FROM posts WHERE id=?',(post_id,)).fetchone()
-                if not post or post['status']!='draft':
-                    raise ValueError('下書きの記事を選んでください。')
+                expected='queued' if data.get('queue_only') else 'draft'
+                if not post or post['status']!=expected:
+                    raise ValueError('記事の状態が変わりました。一覧を更新してください。')
                 self.require_schedulable(post_id,connection=c)
                 pending=c.execute(
-                    "SELECT id FROM jobs WHERE post_id=? AND action='save_note_draft' "
+                    "SELECT id,state,data FROM jobs WHERE post_id=? AND action='save_note_draft' "
                     "AND state IN ('waiting','running') AND json_extract(data,'$.queue')=1",
                     (post_id,),
                 ).fetchone()
                 if pending:
+                    details=json.loads(pending['data'])
+                    if data.get('interrupt_day') and details.get('interrupt_day')!=data['interrupt_day']:
+                        if pending['state']=='running':
+                            raise ValueError('キュー追加が完了してから割り込み日を指定してください。')
+                        details.update(data)
+                        c.execute('UPDATE jobs SET data=? WHERE id=?',
+                                  (json.dumps(details,ensure_ascii=False),pending['id']))
                     return pending['id']
             if ui_session is not None:
                 current=c.execute('SELECT value FROM settings WHERE key=?',('discord_active_ui',)).fetchone()
@@ -122,7 +130,7 @@ class RemoteStore:
             allowed=("AND (action IN ('schedule','publish_note','tags') OR request_key LIKE 'publish-preflight:%' OR (action='refresh_article' AND json_extract(data,'$.selection_read')=1)) " if editing_locally else
                      "" if browser_allowed else "AND (action IN ('pause','resume','cancel_schedule','relogin_note',"
                      "'schedule','publish_note','tags') OR request_key LIKE 'publish-preflight:%') ")
-            row=c.execute("SELECT id FROM jobs WHERE state='waiting' "+allowed+"ORDER BY created LIMIT 1").fetchone()
+            row=c.execute("SELECT id FROM jobs WHERE state='waiting' "+allowed+"ORDER BY created,rowid LIMIT 1").fetchone()
             if not row:
                 return None
             c.execute("UPDATE jobs SET state='running',updated=? WHERE id=?",(timestamp(),row['id']))
