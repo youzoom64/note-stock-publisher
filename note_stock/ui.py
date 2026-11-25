@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from pathlib import Path
 
 from PySide6.QtCore import Qt, QDateTime, QTime, QTimeZone, QTimer, QSize, QUrl, QProcess
 from PySide6.QtGui import QColor, QDesktopServices, QIcon, QPainter, QPixmap, QAction, QKeySequence
@@ -9,23 +8,47 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QLineEdit, QPlainTextEdit, QComboBox, QListWidget, QListWidgetItem, QSplitter,
     QFormLayout, QDateTimeEdit, QTimeEdit, QDialog, QDialogButtonBox, QCheckBox,
-    QMessageBox, QFileDialog, QScrollArea, QFrame, QSystemTrayIcon, QMenu, QTabWidget,
+    QMessageBox, QFrame, QScrollArea, QMenu, QTabWidget,
+    QButtonGroup, QRadioButton, QStyle, QStyledItemDelegate,
 )
 
 from .platform import autostart_enabled, set_autostart
 from .publisher import account_id
-from .store import JST, LOCKED, STATUSES, Scheduler, now_ts, tags_from_text
+from .store import JST, LOCKED, STATUSES, Scheduler, article_timestamp, now_ts, tags_from_text
 from .worker import BrowserWorker
 from .preview import RichPreview
-from .native import EDITOR_FEATURES
 from .vendor.qt_dropdown import StableDropdown
 from .vendor.qt_anchor_splitter import bind_splitter_anchor
 from .vendor.qt_scroll_guard import capture_scroll, restore_scroll
 
+ARTICLE_FILTERS = {
+    '': ('すべて', frozenset()),
+    'draft': ('下書き', frozenset({'draft', 'editing'})),
+    'queued': ('投稿待ち', frozenset({'queued', 'scheduled', 'native_reserved', 'posting'})),
+    'published': ('投稿済み', frozenset({'published'})),
+    'native_private': ('非公開', frozenset({'native_private'})),
+    'review': ('要確認', frozenset({'failed', 'held', 'unknown', 'overdue', 'review'})),
+}
+ARTICLE_ROW_COLORS = {
+    status: color
+    for group, color in {
+        'draft': '#EAF4FF',
+        'queued': '#FFF4D9',
+        'published': '#E7F5EC',
+        'native_private': '#F1EBFA',
+        'review': '#FCEBE7',
+    }.items()
+    for status in ARTICLE_FILTERS[group][1]
+}
+
 STYLE = """
 QWidget {font-family:'Yu Gothic UI','Meiryo'; font-size:13px; color:#25342f;}
 QMainWindow, QDialog {background:#f4f7f5;}
-QLabel#brand {font-size:24px; font-weight:700; color:#143e30;}
+QMenu {background:#ffffff; color:#25342f; border:1px solid #cddbd2; padding:4px; border-radius:5px;}
+QMenu::item {padding:6px 14px;}
+QMenu::item:selected {background:#d8eadd; color:#153f2e;}
+QMenu::item:disabled {color:#52685b;}
+QToolTip {background:#ffffff; color:#25342f; border:1px solid #9aaba2; padding:4px;}
 QLabel#section {font-size:17px; font-weight:700;}
 QLabel#muted {color:#687a72;}
 QLabel#notice {background:#fff3d9; color:#6e4d12; border:1px solid #e9d29d; border-radius:7px; padding:10px;}
@@ -41,12 +64,16 @@ QLineEdit, QPlainTextEdit, QTextBrowser, QComboBox, QDateTimeEdit, QTimeEdit {ba
 QLineEdit:focus, QPlainTextEdit:focus {border:1px solid #16845e;}
 QLineEdit#title {font-size:21px; font-weight:600; padding:10px;}
 QListWidget {background:white; border:0; outline:0;}
+QTableWidget {background:white; alternate-background-color:#f4f7f5; color:#25342f; border:1px solid #cddbd2; gridline-color:#dce5df; selection-background-color:#16845e; selection-color:white;}
+QTableWidget::item {padding:5px;}
+QTableWidget::item:selected {background:#16845e; color:white;}
+QHeaderView::section {background:#e5ede7; color:#25342f; border:0; border-right:1px solid #cddbd2; border-bottom:1px solid #cddbd2; padding:6px; font-weight:600;}
+QTableWidget QLineEdit {background:white; color:#25342f; selection-background-color:#16845e; selection-color:white;}
 QListWidget::item {padding:12px 10px; border-bottom:1px solid #edf1ed; border-left:3px solid transparent;}
-QListWidget::item:selected {background:#e9f5ee; color:#153f2e; border-left:3px solid #16845e;}
-QListWidget::item:hover:!selected {background:#f5f9f6;}
+QListWidget::item:selected {color:#153f2e; border-left:3px solid #16845e;}
+QListWidget#draft_imports::item:selected {background:#e9f5ee;}
+QListWidget#draft_imports::item:hover:!selected {background:#f5f9f6;}
 QSplitter::handle {background:#dce5df; width:5px;}
-QScrollArea {border:0; background:white;}
-QWidget#editor {background:white;}
 QPushButton[primary="true"] {background:#16845e; color:white; border-color:#16845e; font-weight:600;}
 QPushButton[primary="true"]:hover {background:#106b4b;}
 QPushButton[primary="true"]:disabled {background:#b3cabc; border-color:#b3cabc;}
@@ -56,7 +83,52 @@ QTabBar::tab {background:#e5ede7; color:#52685b; padding:9px 24px; border:0;}
 QTabBar::tab:selected {background:white; color:#143e30; border-bottom:2px solid #16845e; font-weight:600;}
 QTabBar::tab:hover:!selected {background:#d7e7dc;}
 QCheckBox {spacing:5px;}
+QRadioButton[articleFilter="true"] {spacing:5px; padding:2px 0;}
+QRadioButton[articleFilter="true"]:checked {color:#106b4b; font-weight:600;}
+QListWidget#posts QScrollBar:vertical,
+QScrollArea#posting_settings_scroll QScrollBar:vertical {
+    background:#eaf0ec; width:13px; margin:2px;
+    border-radius:4px;
+}
+QListWidget#posts QScrollBar::handle:vertical,
+QScrollArea#posting_settings_scroll QScrollBar::handle:vertical {
+    background:#78958a; min-height:24px; border-radius:4px;
+}
+QListWidget#posts QScrollBar::handle:vertical:hover,
+QScrollArea#posting_settings_scroll QScrollBar::handle:vertical:hover {background:#4e7867;}
+QListWidget#posts QScrollBar::add-line:vertical,
+QListWidget#posts QScrollBar::sub-line:vertical,
+QScrollArea#posting_settings_scroll QScrollBar::add-line:vertical,
+QScrollArea#posting_settings_scroll QScrollBar::sub-line:vertical {height:0;}
+QListWidget#posts QScrollBar::add-page:vertical,
+QListWidget#posts QScrollBar::sub-page:vertical,
+QScrollArea#posting_settings_scroll QScrollBar::add-page:vertical,
+QScrollArea#posting_settings_scroll QScrollBar::sub-page:vertical {background:transparent;}
 """
+
+
+class ArticleRowDelegate(QStyledItemDelegate):
+    def paint(self, painter, option, index):
+        painter.save()
+        row = option.rect
+        painter.setClipRect(row)
+        painter.fillRect(row, index.data(Qt.ItemDataRole.BackgroundRole))
+        painter.fillRect(row.left(), row.bottom(), row.width(), 1, QColor(37, 52, 47, 26))
+        selected = option.state & QStyle.StateFlag.State_Selected
+        if selected:
+            painter.fillRect(row.left(), row.top(), 3, row.height(), QColor('#16845e'))
+
+        painter.setFont(option.font)
+        painter.setPen(QColor('#153f2e' if selected else '#25342f'))
+        metrics = painter.fontMetrics()
+        text = index.data(Qt.ItemDataRole.DisplayRole)
+        lines = text.split('\n')
+        baseline = row.top() + (row.height() - len(lines) * metrics.height()) // 2 + metrics.ascent()
+        for line in lines:
+            elided = metrics.elidedText(line, Qt.TextElideMode.ElideRight, max(0, row.width() - 23))
+            painter.drawText(row.left() + 13, baseline, elided)
+            baseline += metrics.height()
+        painter.restore()
 
 
 def icon():
@@ -121,6 +193,9 @@ class SettingsDialog(QDialog):
         info = label("利用者本人のアカウントでログインします。パスワードはこのアプリに入力しません。", "muted")
         info.setWordWrap(True)
         layout.addWidget(info)
+        google_hint = label('「Googleでログイン」を使う方は、先に上のログイン方法を「Google」に変更してください。', 'muted')
+        google_hint.setWordWrap(True)
+        layout.addWidget(google_hint)
         self.connect_button = button("ログイン・接続確認", self.connect_account)
         self.connect_button.setEnabled(not parent or not parent.busy())
         layout.addWidget(self.connect_button, alignment=Qt.AlignmentFlag.AlignLeft)
@@ -145,12 +220,14 @@ class SettingsDialog(QDialog):
         self.favorites.setMaximumHeight(85)
         self.favorites.setPlaceholderText("#日記 #エッセイ #暮らし　空白・改行・カンマで区切る")
         layout.addWidget(self.favorites)
-        self.autostart = QCheckBox("Windowsログイン時にトレイへ自動起動する")
+        self.autostart = QCheckBox("Windowsログイン時にアプリを起動する")
         self.autostart.setChecked(autostart_enabled())
-        self.diagnostics = QCheckBox("診断ログを保存する")
-        self.diagnostics.setChecked(store.setting("diagnostics", False))
+        from .diagnostics import DEFAULT_ENABLED
+        self.diagnostics = QCheckBox("診断ログを保存する（次回起動で初期化）")
+        self.diagnostics.setChecked(store.setting("diagnostics", DEFAULT_ENABLED))
         layout.addWidget(self.autostart)
         layout.addWidget(self.diagnostics)
+        layout.addWidget(button('拡張機能：Discord内で再ログイン',self.remote_extension))
         info = label("原稿・画像・ログイン状態は、このアプリのdataフォルダー内に保存します。\n終了・スリープ中は投稿しません。期限を過ぎた予約は再予約が必要です。", "muted")
         info.setWordWrap(True)
         layout.addWidget(info)
@@ -164,6 +241,10 @@ class SettingsDialog(QDialog):
     def connect_account(self):
         self.request_login = True
         self.save()
+
+    def remote_extension(self):
+        from .relogin_ui import ReloginDialog
+        ReloginDialog(self.store,self).exec()
 
     def save(self):
         try:
@@ -208,6 +289,7 @@ class DraftImportDialog(QDialog):
         info.setWordWrap(True)
         layout.addWidget(info)
         self.list=QListWidget()
+        self.list.setObjectName('draft_imports')
         for row in items:
             item=QListWidgetItem((row['title'] or '無題の下書き')+'\n'+str(row.get('updated',''))+' · '+row.get('owner',''))
             item.setFlags(item.flags()|Qt.ItemFlag.ItemIsUserCheckable)
@@ -265,22 +347,28 @@ class MainWindow(QMainWindow):
         self.worker = None
         self.quitting = False
         self.pending_drafts=None
+        self.pending_edit_id=None
         self.revision = 0
-        self.setWindowTitle("noteストック — 投稿管理と記事の編集")
+        self.setWindowTitle("noteストック — 投稿管理")
         self.setWindowIcon(icon())
         screen=QApplication.primaryScreen().availableGeometry()
         saved_size=store.setting("window_size", [1260, 900])
         self.resize(min(saved_size[0],screen.width()),min(saved_size[1],screen.height()-40))
         self.setMinimumSize(940, 640)
         self.build_ui()
-        self.build_tray()
         recovered = store.recover()
         self.scheduler = Scheduler(store)
         self.refresh()
         state=store.setting('ui_state',{})
-        self.tabs.setCurrentIndex(state.get('tab',0))
+        saved_order = state.get('article_order')
+        if isinstance(saved_order, str) and saved_order in self.order_buttons:
+            self.order_buttons[saved_order].setChecked(True)
         self.search.setText(state.get('search',''))
-        self.filter.setCurrentIndex(max(0,self.filter.findData(state.get('filter',''))))
+        saved_filter = state.get('filter')
+        for key, (_, statuses) in ARTICLE_FILTERS.items():
+            if isinstance(saved_filter, str) and saved_filter in statuses:
+                self.filter_buttons[key].setChecked(True)
+                break
         selected=state.get('selected')
         if selected and any(p['id']==selected for p in store.posts()):
             self.load(selected)
@@ -304,6 +392,16 @@ class MainWindow(QMainWindow):
             self.remote_controller.timer.stop()
         self.discord_panel=DiscordPanel(self,connect_on_start=not offline)
         self.tabs.addTab(self.discord_panel,'Discord・セットアップ')
+        if state.get('page')=='discord' or (not state.get('page') and state.get('tab')==2):
+            self.tabs.setCurrentWidget(self.discord_panel)
+        if not offline:
+            try:
+                from .relogin import manager
+                manager(self.store).start()
+                from .schedule_activity import ensure_host
+                ensure_host(self.store)
+            except Exception as exc:
+                self.notify('遠隔再ログイン拡張を開始できません: '+str(exc),True)
         save_action = QAction("保存", self)
         save_action.setShortcut(QKeySequence.StandardKey.Save)
         save_action.triggered.connect(self.save_current)
@@ -313,41 +411,57 @@ class MainWindow(QMainWindow):
         root = QWidget()
         self.setCentralWidget(root)
         layout = QVBoxLayout(root)
-        layout.setContentsMargins(22, 18, 22, 12)
-        layout.setSpacing(12)
-        header = QHBoxLayout()
-        title = QVBoxLayout()
-        title.addWidget(label("noteストック", "brand"))
-        title.addWidget(label("書きためた文章を、届けたいタイミングで。", "muted"))
-        header.addLayout(title)
-        header.addStretch()
+        layout.setContentsMargins(22, 8, 22, 12)
+        layout.setSpacing(6)
+        self.notice = label("", "notice")
+        self.notice.setWordWrap(True)
+        self.notice.hide()
+        layout.addWidget(self.notice)
+        self.tabs=QTabWidget()
+        self.tabs.setObjectName('main_tabs')
+        layout.addWidget(self.tabs,1)
+        controls = QWidget()
+        header = QHBoxLayout(controls)
+        header.setContentsMargins(8, 0, 0, 0)
+        header.setSpacing(8)
+        self.counts = QWidget()
+        self.counts.setStyleSheet('background:#f4f7f5;')
+        legend = QHBoxLayout(self.counts)
+        legend.setContentsMargins(0, 0, 0, 0)
+        legend.setSpacing(10)
+        self.count_labels = {}
+        for key, name in (('draft', 'ストック'), ('queued', '投稿待ち'), ('published', '投稿済み'), ('review', '要確認')):
+            entry = QHBoxLayout()
+            entry.setSpacing(4)
+            swatch = QLabel()
+            swatch.setFixedSize(14, 14)
+            color = ARTICLE_ROW_COLORS[next(iter(ARTICLE_FILTERS[key][1]))]
+            swatch.setStyleSheet(f'background:{color}; border:1px solid #9aaba2; border-radius:2px;')
+            swatch.setToolTip(name + 'の記事の背景色')
+            entry.addWidget(swatch)
+            self.count_labels[key] = label(name + ' 0', 'muted')
+            entry.addWidget(self.count_labels[key])
+            legend.addLayout(entry)
+        header.addWidget(self.counts)
+        header.addSpacing(8)
         self.account_label = label("未接続", "muted")
         header.addWidget(self.account_label)
         header.addWidget(button("設定", self.settings))
         self.pause_button = button("自動投稿を開始", self.toggle_pause, True)
         self.pause_button.setObjectName("pause")
         header.addWidget(self.pause_button)
-        layout.addLayout(header)
-        self.notice = label("", "notice")
-        self.notice.setWordWrap(True)
-        self.notice.hide()
-        layout.addWidget(self.notice)
-        self.counts = label("", "muted")
-        layout.addWidget(self.counts)
-        self.tabs=QTabWidget()
-        self.tabs.setObjectName('main_tabs')
-        layout.addWidget(self.tabs,1)
+        self.tabs.setCornerWidget(controls, Qt.Corner.TopRightCorner)
         management=QWidget()
+        self.management_page=management
         self.tabs.addTab(management,'投稿管理')
         management_layout=QVBoxLayout(management)
-        management_layout.setContentsMargins(0,10,0,0)
+        management_layout.setContentsMargins(0,6,0,0)
         self.splitter = QSplitter(Qt.Orientation.Horizontal)
         self.splitter.setChildrenCollapsible(False)
         self.splitter.setObjectName("main_splitter")
         management_layout.addWidget(self.splitter,1)
         left = QFrame()
         left.setObjectName("card")
-        left.setMinimumWidth(420)
         pane = QVBoxLayout(left)
         pane.setContentsMargins(12, 14, 12, 10)
         pane.addWidget(label("ストックと投稿予定", "section"))
@@ -356,12 +470,22 @@ class MainWindow(QMainWindow):
         self.search.setClearButtonEnabled(True)
         self.search.textChanged.connect(self.refresh_list)
         pane.addWidget(self.search)
-        self.filter = StableDropdown()
-        self.filter.addItem("すべての原稿", "")
-        for status, name in STATUSES.items():
-            self.filter.addItem(name, status)
-        self.filter.currentIndexChanged.connect(self.refresh_list)
-        pane.addWidget(self.filter)
+        self.filter_group = QButtonGroup(left)
+        self.filter_buttons = {}
+        filters = QHBoxLayout()
+        filters.setSpacing(12)
+        for status, (name, _) in ARTICLE_FILTERS.items():
+            radio = QRadioButton(name)
+            radio.setProperty('articleFilter', True)
+            radio.setProperty('status', status)
+            radio.setAccessibleName(f"原稿の絞り込み: {name}")
+            self.filter_buttons[status] = radio
+            self.filter_group.addButton(radio)
+            filters.addWidget(radio)
+        filters.addStretch()
+        self.filter_buttons[''].setChecked(True)
+        self.filter_group.idToggled.connect(lambda _, checked: checked and self.refresh_list())
+        pane.addLayout(filters)
         self.import_button=button('noteの全記事を同期',self.import_drafts,True)
         pane.addWidget(self.import_button)
         tools = QHBoxLayout()
@@ -373,18 +497,53 @@ class MainWindow(QMainWindow):
         pane.addLayout(tools)
         self.list = QListWidget()
         self.list.setObjectName("posts")
+        self.list.setItemDelegate(ArticleRowDelegate(self.list))
+        self.list.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
         self.list.currentItemChanged.connect(self.selection_changed)
         pane.addWidget(self.list, 1)
         order = QHBoxLayout()
-        order.addWidget(button("↑ 上へ", lambda: self.reorder(-1)))
-        order.addWidget(button("↓ 下へ", lambda: self.reorder(1)))
+        self.move_up = button("↑ 上へ", lambda: self.reorder(-1))
+        self.move_down = button("↓ 下へ", lambda: self.reorder(1))
+        for control in (self.move_up, self.move_down):
+            control.setToolTip("手動順で記事の位置を変更します")
+            control.setEnabled(False)
+            order.addWidget(control)
         order.addStretch()
+        self.order_group = QButtonGroup(left)
+        self.order_buttons = {}
+        for key, name in (('manual', '手動順'), ('newest', '新しい順'), ('oldest', '古い順')):
+            radio = QRadioButton(name)
+            radio.setProperty('articleFilter', True)
+            radio.setProperty('order', key)
+            radio.setAccessibleName(f"記事の並べ替え: {name}")
+            if key != 'manual':
+                radio.setToolTip("noteの更新日時で並べ替えます。未同期の記事は登録日時を使います。")
+            self.order_group.addButton(radio)
+            self.order_buttons[key] = radio
+            order.addWidget(radio)
+        self.order_buttons['newest'].setChecked(True)
+        self.order_group.buttonToggled.connect(self.order_changed)
         pane.addLayout(order)
         self.splitter.addWidget(left)
         posting=QFrame()
         posting.setObjectName('card')
         posting.setMinimumWidth(330)
-        self.posting_fields=QVBoxLayout(posting)
+        posting_layout = QVBoxLayout(posting)
+        posting_layout.setContentsMargins(0, 0, 0, 0)
+        posting_layout.setSpacing(0)
+        self.posting_scroll = QScrollArea()
+        self.posting_scroll.setObjectName('posting_settings_scroll')
+        self.posting_scroll.setAccessibleName('投稿設定')
+        self.posting_scroll.setWidgetResizable(True)
+        self.posting_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.posting_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.posting_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        posting_contents = QWidget()
+        posting_contents.setObjectName('posting_contents')
+        posting_contents.setStyleSheet('QWidget#posting_contents {background: white;}')
+        self.posting_scroll.setWidget(posting_contents)
+        posting_layout.addWidget(self.posting_scroll, 1)
+        self.posting_fields=QVBoxLayout(posting_contents)
         self.posting_fields.setContentsMargins(16,14,16,14)
         self.posting_fields.setSpacing(12)
         self.posting_fields.addWidget(label('投稿設定','section'))
@@ -392,57 +551,6 @@ class MainWindow(QMainWindow):
         self.selected_title.setWordWrap(True)
         self.posting_fields.addWidget(self.selected_title)
         self.splitter.addWidget(posting)
-        right = QFrame()
-        right.setObjectName("card")
-        self.tabs.addTab(right,'記事の編集')
-        pane = QVBoxLayout(right)
-        pane.setContentsMargins(16, 14, 16, 14)
-        row = QHBoxLayout()
-        self.editor_heading = label("原稿を選ぶか、新規作成してください", "section")
-        row.addWidget(self.editor_heading, 1)
-        self.save_state = label("", "muted")
-        row.addWidget(self.save_state)
-        pane.addLayout(row)
-        native_bar=QHBoxLayout()
-        self.edit_button=button('noteで本文・装飾・素材を編集',self.edit_native,True,'native_edit')
-        self.cancel_edit_button=button('編集を中止',self.cancel_edit)
-        native_bar.addWidget(self.edit_button)
-        native_bar.addWidget(self.cancel_edit_button)
-        self.editor_save_button=button('原稿を保存',self.save_current)
-        native_bar.addWidget(self.editor_save_button)
-        native_bar.addStretch()
-        pane.addLayout(native_bar)
-        native_help=label('本文・装飾・画像などは、note本来の編集画面を大きく開いて編集できます。投稿日時とタグは「投稿管理」で設定します。','muted')
-        native_help.setWordWrap(True)
-        native_help.setToolTip(' / '.join(EDITOR_FEATURES))
-        pane.addWidget(native_help)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        self.editor = QWidget()
-        self.editor.setObjectName("editor")
-        fields = QVBoxLayout(self.editor)
-        fields.setContentsMargins(0, 2, 5, 4)
-        fields.setSpacing(8)
-        fields.addWidget(label("タイトル"))
-        self.title = QLineEdit()
-        self.title.setObjectName("title")
-        self.title.setPlaceholderText("記事のタイトル")
-        self.title.setReadOnly(True)
-        self.title.textChanged.connect(self.mark_dirty)
-        fields.addWidget(self.title)
-        bodyrow = QHBoxLayout()
-        bodyrow.addWidget(label("本文プレビュー（編集は「noteで編集」）"))
-        bodyrow.addStretch()
-        self.body_heading=bodyrow.itemAt(0).widget()
-        self.char_count = label("0文字", "muted")
-        bodyrow.addWidget(self.char_count)
-        fields.addLayout(bodyrow)
-        self.body = RichPreview()
-        self.body.setObjectName("body")
-        self.body.setPlaceholderText("ここに文章を書きためます。改行はそのまま投稿されます。")
-        self.body.setMinimumHeight(210)
-        self.body.textChanged.connect(self.mark_dirty)
-        fields.addWidget(self.body, 1)
         tagrow = QHBoxLayout()
         tagrow.addWidget(label("ハッシュタグ"))
         tagrow.addStretch()
@@ -454,23 +562,6 @@ class MainWindow(QMainWindow):
         self.tags.setPlaceholderText("#日記 #エッセイ　空白・カンマで区切る")
         self.tags.textChanged.connect(self.mark_dirty)
         self.posting_fields.addWidget(self.tags)
-        image_row = QHBoxLayout()
-        self.thumb = label("画像なし", "muted")
-        self.thumb.setFixedSize(112, 60)
-        self.thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        image_row.addWidget(self.thumb)
-        image_text = QVBoxLayout()
-        image_text.addWidget(label("見出し画像"))
-        self.image_name = label("記事の冒頭に表示する画像", "muted")
-        self.image_name.setWordWrap(True)
-        image_text.addWidget(self.image_name)
-        image_row.addLayout(image_text, 1)
-        image_row.addWidget(button("画像を選ぶ", self.choose_image))
-        image_row.addWidget(button("解除", self.remove_image))
-        image_holder=QWidget()
-        image_holder.setLayout(image_row)
-        image_holder.hide()
-        fields.addWidget(image_holder)
         form = QFormLayout()
         self.mode = StableDropdown()
         self.mode.setObjectName("post_mode")
@@ -488,13 +579,35 @@ class MainWindow(QMainWindow):
         self.recurrence_label = label("", "muted")
         self.recurrence_label.setWordWrap(True)
         self.posting_fields.addWidget(self.recurrence_label)
-        scroll.setWidget(self.editor)
-        pane.addWidget(scroll, 1)
         self.error_label = label("")
         self.error_label.setWordWrap(True)
         self.error_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.posting_fields.addWidget(self.error_label)
-        self.posting_fields.addStretch()
+        preview_header = QHBoxLayout()
+        preview_header.addWidget(label('本文プレビュー', 'section'))
+        preview_header.addStretch()
+        self.local_draft_button = button('下書き入力', self.edit_local_draft)
+        self.edit_button = button('noteで編集', self.edit_native, True, 'native_edit')
+        self.cancel_edit_button = button('中止', self.cancel_edit)
+        for control in (self.local_draft_button, self.edit_button, self.cancel_edit_button):
+            preview_header.addWidget(control)
+        self.posting_fields.addLayout(preview_header)
+        self.body = RichPreview()
+        self.body.setObjectName('article_preview')
+        self.body.setAccessibleName('記事の本文プレビュー')
+        self.body.setReadOnly(True)
+        self.body.setMinimumHeight(270)
+        self.body.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        self.posting_fields.addWidget(self.body, 1)
+        self.save_state = label('', 'muted')
+        self.posting_fields.addWidget(self.save_state)
+        footer = QFrame()
+        footer.setObjectName('posting_actions')
+        footer.setStyleSheet('QFrame#posting_actions {border-top: 1px solid #dce5df;}')
+        footer_layout = QVBoxLayout(footer)
+        footer_layout.setContentsMargins(16, 10, 16, 10)
+        footer_layout.setSpacing(8)
+        posting_layout.addWidget(footer)
         actions = QHBoxLayout()
         self.save_button = button("投稿設定を保存", self.save_current, True, "save")
         self.publish_button = button("今すぐ投稿", self.publish_now)
@@ -503,28 +616,15 @@ class MainWindow(QMainWindow):
         self.history_button = button("履歴", self.history)
         for b in (self.save_button,self.publish_button):
             actions.addWidget(b)
-        self.posting_fields.addLayout(actions)
+        footer_layout.addLayout(actions)
         results=QHBoxLayout()
         for b in (self.verify_button,self.open_button,self.history_button):
             results.addWidget(b)
-        self.posting_fields.addLayout(results)
+        footer_layout.addLayout(results)
         self.splitter.setSizes(self.store.setting("management_splitter_sizes", [760,360]))
         self.splitter_binding=bind_splitter_anchor(self.splitter,fixed_index=1,
             initial_size=self.store.setting('management_splitter_sizes',[760,360])[1],min_size=330,max_size=500,handle_width=8)
         self.statusBar().showMessage("原稿を登録して、設定からnoteへログインしてください。")
-
-    def build_tray(self):
-        self.tray = QSystemTrayIcon(icon(), self)
-        self.tray.setToolTip("noteストック")
-        menu = QMenu()
-        menu.addAction("開く", self.show_normal)
-        menu.addAction("自動投稿の開始 / 一時停止", self.toggle_pause)
-        menu.addSeparator()
-        menu.addAction("終了", self.quit_app)
-        self.tray.setContextMenu(menu)
-        self.tray.activated.connect(lambda reason: self.show_normal() if reason == QSystemTrayIcon.ActivationReason.DoubleClick else None)
-        if QSystemTrayIcon.isSystemTrayAvailable():
-            self.tray.show()
 
     def show_normal(self):
         self.showNormal()
@@ -534,24 +634,27 @@ class MainWindow(QMainWindow):
     def busy(self):
         return bool(self.worker and self.worker.isRunning())
 
+    def foreground_busy(self):
+        return self.busy() and not getattr(self.worker,'headless_sync',False)
+
     def notify(self, message, warning=False):
         self.notice.setText(message)
         self.notice.show()
         self.statusBar().showMessage(message)
-        if warning and self.tray.isVisible():
-            self.tray.showMessage("noteストック", message, QSystemTrayIcon.MessageIcon.Warning, 10000)
+        if warning:
+            from .diagnostics import Diagnostics
+            Diagnostics(self.store).error('application_warning_displayed')
 
     def fail(self, exc):
+        from .diagnostics import Diagnostics
+        Diagnostics(self.store).error('gui_operation_error',exc)
         self.notify(str(exc), True)
 
     def mark_dirty(self, *_):
         if self.loading or not self.current_id:
             return
-        if self.sender()==self.body and self.body.isReadOnly():
-            return
         self.dirty = True
         self.save_state.setText("未保存の変更")
-        self.char_count.setText(f"{len(self.body.toPlainText()):,}文字")
 
     def mode_changed(self, *_):
         self.when.setEnabled(self.mode.currentData() == "scheduled")
@@ -593,50 +696,32 @@ class MainWindow(QMainWindow):
             self.current_id = post_id
             self.current = self.store.get(post_id) if post_id else None
             p = self.current or {}
-            self.title.setText(p.get("title", ""))
-            self.body.setPlainText(p.get("body", ""))
             if p.get('native_html'):
                 self.body.setHtml(p['native_html'])
+            else:
+                self.body.setPlainText(p.get('body') or ('本文をまだ取得していません。' if p.get('draft_key') else
+                    '本文がありません。' if p else '記事を選ぶと本文が表示されます。'))
+            self.body.verticalScrollBar().setValue(0)
             self.tags.setText(" ".join("#" + tag for tag in p.get("tags", [])))
             self.image = p.get("image", "")
-            self.update_image()
             self.mode.setCurrentIndex(max(0, self.mode.findData(p.get("status", "draft"))))
             self.when.setDateTime(jst_qdate(p.get("due") or now_ts() + 3600))
             self.when.setEnabled(self.mode.currentData() == "scheduled")
             self.dirty = False
             self.save_state.setText(('note保存確認済み' if p.get('draft_key') and p.get('native_ready') else
                                      'note上の記事・内容未確認' if p.get('draft_key') else 'PCに仮保存・note未保存') if p else '')
-            self.char_count.setText(f"{len(p.get('body', '')):,}文字")
             self.refresh_controls()
         except Exception as exc:
             self.fail(exc)
         finally:
             self.loading = False
 
-    def update_image(self):
-        self.thumb.clear()
-        if self.image:
-            try:
-                path = self.store.image_path(self.image)
-                pix = QPixmap(str(path))
-                self.thumb.setPixmap(pix.scaled(self.thumb.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
-                self.image_name.setText(Path(self.image).name)
-            except Exception as exc:
-                self.thumb.setText("画像がありません")
-                self.image_name.setText(str(exc))
-        else:
-            self.thumb.setText("画像なし")
-            self.image_name.setText("記事の冒頭に表示する画像")
-
     def refresh_controls(self):
         p = self.current or {}
         locked = p.get("status") in LOCKED
-        self.editor.setEnabled(bool(p) and not locked)
-        self.title.setReadOnly(bool(p.get('draft_key')))
-        self.body.setReadOnly(bool(p.get('draft_key')))
-        self.body_heading.setText('本文プレビュー（本文・装飾・素材はnoteで編集）' if p.get('draft_key') else '本文')
         self.save_button.setEnabled(bool(p) and not locked)
-        self.editor_save_button.setEnabled(bool(p) and not locked)
+        self.local_draft_button.setVisible(bool(p) and not p.get('draft_key') and not locked)
+        self.local_draft_button.setEnabled(not self.busy())
         self.tags.setEnabled(bool(p) and not locked)
         self.favorite_button.setEnabled(bool(p) and not locked)
         self.mode.setEnabled(bool(p) and not locked)
@@ -644,15 +729,16 @@ class MainWindow(QMainWindow):
         self.selected_title.setText(p.get('title') or ('無題の原稿' if p else '一覧から記事を選んでください。'))
         self.publish_button.setEnabled(bool(p) and not locked and not self.busy())
         self.publish_button.setEnabled(self.publish_button.isEnabled() and bool(p.get('native_ready')))
-        self.import_button.setEnabled(not self.busy())
-        self.edit_button.setEnabled(bool(p) and p.get('status') not in {'posting','unknown','editing','native_reserved'} and not self.busy())
+        self.import_button.setEnabled(not self.foreground_busy())
+        self.edit_button.setEnabled(bool(p) and p.get('status') not in {'posting','unknown','editing','native_reserved'}
+                                    and not self.foreground_busy())
         self.cancel_edit_button.setEnabled(self.busy() and self.worker.action=='edit')
+        self.cancel_edit_button.setVisible(self.cancel_edit_button.isEnabled())
         self.verify_button.setEnabled(bool(p.get("draft_key")) and p.get("status") in {"unknown", "failed", "held"} and not self.busy())
         self.open_button.setEnabled(bool(p.get("url") or p.get("draft_key")))
         self.duplicate_button.setEnabled(bool(p))
         self.delete_button.setEnabled(bool(p) and p.get("status") not in {"posting", "unknown",'editing'})
         self.history_button.setEnabled(bool(p))
-        self.editor_heading.setText(STATUSES.get(p.get("status"), "原稿を選ぶか、新規作成してください"))
         summary=p.get('native_summary',{})
         price=summary.get('price',0)
         kind=(f'有料 {price}円' if price else ('限定公開' if summary.get('limited') else '無料公開'))
@@ -661,31 +747,46 @@ class MainWindow(QMainWindow):
 
     def refresh_list(self, *_):
         try:
-            posts = self.store.posts()
+            posts = self.store.posts(with_catalog=True)
             query = self.search.text().casefold()
-            status = self.filter.currentData()
-            visible = [p for p in posts if (not status or p["status"] == status) and
+            filter_key = self.filter_group.checkedButton().property('status')
+            statuses = ARTICLE_FILTERS[filter_key][1]
+            visible = [p for p in posts if (not statuses or p["status"] in statuses) and
                        query in (p["title"] + "\n" + p["body"] + " " + " ".join(p["tags"])).casefold()]
-            self.list.blockSignals(True)
-            scroll = capture_scroll(self.list)
-            self.list.clear()
-            selected = None
+            order = self.order_group.checkedButton().property('order')
+            if order != 'manual':
+                visible.sort(key=lambda post: article_timestamp(post, post), reverse=order == 'newest')
+            rows = []
             for p in visible:
                 detail = STATUSES[p["status"]]
-                remote=self.store.catalog_state(p['id']).get('remote_status')
+                remote=p['remote_status']
                 detail += ' / note: '+(remote or ('保存済み' if p['draft_key'] else '未保存'))
                 if p["due"]:
                     detail += " · " + datetime.fromtimestamp(p["due"], JST).strftime("%m/%d %H:%M")
                 tags=' '.join('#'+tag for tag in p['tags'])
-                item = QListWidgetItem((p["title"] or "無題の原稿") + "\n" + detail+ ('\n'+tags if tags else ''))
-                item.setData(Qt.ItemDataRole.UserRole, p["id"])
-                item.setToolTip((p["title"] or "無題の原稿") + "\n" + p["error"])
-                self.list.addItem(item)
-                if p["id"] == self.current_id:
-                    selected = item
-            self.list.setCurrentItem(selected)
-            restore_scroll(self.list,scroll,keep_bottom=False)
-            self.counts.setText(f"ストック {sum(p['status'] == 'draft' for p in posts)}　　投稿待ち {sum(p['status'] in {'queued','scheduled'} for p in posts)}　　投稿済み {sum(p['status'] == 'published' for p in posts)}　　要確認 {sum(p['status'] in {'unknown','failed','held','overdue'} for p in posts)}")
+                title = p["title"] or "無題の原稿"
+                rows.append((p["id"], title + "\n" + detail + ('\n'+tags if tags else ''),
+                             title + "\n" + p["error"], ARTICLE_ROW_COLORS[p["status"]]))
+            self.list.blockSignals(True)
+            scroll = None
+            if rows != getattr(self, '_displayed_rows', None):
+                scroll = capture_scroll(self.list)
+                self.list.clear()
+                for pid, text, tooltip, color in rows:
+                    item = QListWidgetItem(text)
+                    item.setData(Qt.ItemDataRole.UserRole, pid)
+                    item.setToolTip(tooltip)
+                    item.setBackground(QColor(color))
+                    self.list.addItem(item)
+                self._displayed_rows = rows
+            selected_row = next((index for index, row in enumerate(rows) if row[0] == self.current_id), -1)
+            if self.list.currentRow() != selected_row:
+                self.list.setCurrentItem(self.list.item(selected_row) if selected_row >= 0 else None)
+            if scroll is not None:
+                restore_scroll(self.list,scroll,keep_bottom=False)
+            for key, name in (('draft', 'ストック'), ('queued', '投稿待ち'), ('published', '投稿済み'), ('review', '要確認')):
+                statuses = ARTICLE_FILTERS[key][1]
+                self.count_labels[key].setText(f"{name} {sum(p['status'] in statuses for p in posts)}")
         except Exception as exc:
             self.fail(exc)
         finally:
@@ -708,24 +809,67 @@ class MainWindow(QMainWindow):
     def new_post(self):
         if not self.can_leave():
             return
+        source = self.ask_draft_content('新規下書き')
+        if source is None:
+            return
         try:
             self.search.clear()
-            self.filter.setCurrentIndex(0)
-            self.load(self.store.create())
+            self.filter_buttons[''].setChecked(True)
+            self.load(self.store.create(source))
             self.refresh_list()
-            self.tabs.setCurrentIndex(1)
-            self.title.setFocus()
+            self.tabs.setCurrentWidget(self.management_page)
+            self.save_current()
         except Exception as exc:
             self.fail(exc)
 
-    def save_current(self):
+    def ask_draft_content(self, caption, source=None):
+        source = source or {}
+        dialog = QDialog(self)
+        dialog.setWindowTitle(caption)
+        dialog.resize(min(840, self.width()), min(680, self.height()))
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(label('タイトル'))
+        title = QLineEdit(source.get('title', ''))
+        title.setObjectName('title')
+        layout.addWidget(title)
+        layout.addWidget(label('本文'))
+        body = QPlainTextEdit(source.get('body', ''))
+        layout.addWidget(body, 1)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        save = buttons.button(QDialogButtonBox.StandardButton.Save)
+        save.setText('下書きを保存')
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText('キャンセル')
+        def update_save():
+            save.setEnabled(bool(title.text().strip() and body.toPlainText().strip()))
+        title.textChanged.connect(update_save)
+        body.textChanged.connect(update_save)
+        update_save()
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+        return {'title': title.text(), 'body': body.toPlainText()}
+
+    def edit_local_draft(self):
+        if self.busy() or not self.current_id or not self.can_leave():
+            return
+        source = self.store.get(self.current_id)
+        if source['draft_key']:
+            return
+        content = self.ask_draft_content('下書き入力', source)
+        if content is not None and self.save_current(draft_content=content):
+            self.load(self.current_id)
+            self.refresh_list()
+
+    def save_current(self, *, draft_content=None):
         if not self.current_id:
             return False
         try:
             status = self.mode.currentData()
             source=self.store.get(self.current_id)
-            title=source['title'] if source['draft_key'] else self.title.text()
-            body=source['body'] if source['draft_key'] else self.body.toPlainText()
+            content = draft_content if draft_content is not None and not source['draft_key'] else source
+            title, body = content['title'], content['body']
             due=self.when.dateTime().toSecsSinceEpoch() if status=='scheduled' else None
             warning = self.store.save(self.current_id, title, body,
                             tags_from_text(self.tags.text()), self.image, 'draft' if not source['native_ready'] else status,
@@ -748,21 +892,55 @@ class MainWindow(QMainWindow):
             return False
 
     def edit_native(self):
-        if self.busy() or not self.current_id:
+        post_id=self.current_id
+        if self.pending_edit_id:
+            self.statusBar().showMessage('同期完了後に、先ほど選んだ記事をnoteで開きます。')
+            return
+        if self.foreground_busy() or not post_id:
             return
         try:
             if not self.store.setting('account_verified',False):
                 raise ValueError('設定から利用者本人のnoteアカウントへログインしてください。')
             if not self.can_leave():
                 return
-            self.tabs.setCurrentIndex(1)
-            post=self.store.begin_native_edit(self.current_id)
-            self.start_worker('edit',post)
+            if self.foreground_busy() or self.quitting:
+                return
+            if self.busy():
+                worker=self.worker
+                self.pending_edit_id=post_id
+                worker.finished.connect(self.resume_pending_edit,Qt.ConnectionType.QueuedConnection)
+                self.statusBar().showMessage('同期完了後に、選んだ記事をnoteで開きます。')
+                self.refresh_controls()
+                if not worker.isRunning():
+                    QTimer.singleShot(0,self.resume_pending_edit)
+                return
+            self.open_native_editor(post_id)
         except Exception as exc:
             self.fail(exc)
 
+    def resume_pending_edit(self):
+        post_id=self.pending_edit_id
+        if not post_id or self.quitting:
+            self.pending_edit_id=None
+            return
+        try:
+            if self.can_leave() and not self.busy() and not self.quitting:
+                self.open_native_editor(post_id)
+        except Exception as exc:
+            self.fail(exc)
+        finally:
+            self.pending_edit_id=None
+            self.refresh_controls()
+
+    def open_native_editor(self,post_id):
+        if not self.store.setting('account_verified',False):
+            raise ValueError('設定から利用者本人のnoteアカウントへログインしてください。')
+        self.tabs.setCurrentWidget(self.management_page)
+        post=self.store.begin_native_edit(post_id)
+        self.start_worker('edit',post)
+
     def import_drafts(self):
-        if self.busy():
+        if self.foreground_busy():
             return
         if not self.store.setting('account_verified',False):
             self.fail('設定から利用者本人のnoteアカウントへログインしてください。')
@@ -813,28 +991,21 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self.fail(exc)
 
+    def order_changed(self, radio, checked):
+        if checked:
+            manual = radio is self.order_buttons['manual']
+            self.move_up.setEnabled(manual)
+            self.move_down.setEnabled(manual)
+            self.refresh_list()
+            self.list.verticalScrollBar().setValue(0)
+
     def reorder(self, direction):
-        if self.current_id:
+        if self.current_id and self.order_buttons['manual'].isChecked():
             try:
                 self.store.reorder(self.current_id, direction)
                 self.refresh_list()
             except Exception as exc:
                 self.fail(exc)
-
-    def choose_image(self):
-        path, _ = QFileDialog.getOpenFileName(self, "見出し画像を選ぶ", "", "画像 (*.png *.jpg *.jpeg *.webp)")
-        if path:
-            try:
-                self.image = self.store.import_image(path)
-                self.update_image()
-                self.mark_dirty()
-            except Exception as exc:
-                self.fail(exc)
-
-    def remove_image(self):
-        self.image = ""
-        self.update_image()
-        self.mark_dirty()
 
     def favorite_menu(self):
         menu = QMenu(self)
@@ -901,7 +1072,7 @@ class MainWindow(QMainWindow):
             return
         p = self.store.get(self.current_id)
         if not p['url']:
-            self.tabs.setCurrentIndex(1)
+            self.tabs.setCurrentWidget(self.management_page)
             if p['draft_key']:
                 self.edit_native()
             return
@@ -967,7 +1138,7 @@ class MainWindow(QMainWindow):
         if self.quitting:
             return
         try:
-            post = self.scheduler.tick(busy=self.busy() or self.dirty)
+            post = self.scheduler.tick(busy=self.busy() or self.dirty or self.pending_edit_id is not None)
             if post:
                 self.start_worker("publish", post)
             # Poll only database metadata, never rebuild the editor or move focus.
@@ -987,7 +1158,9 @@ class MainWindow(QMainWindow):
 
     def persist_layout(self):
         results = self.store.settings_batch({"window_size": [self.width(), self.height()], "management_splitter_sizes": self.splitter.sizes(),
-            'ui_state':{'selected':self.current_id,'search':self.search.text(),'filter':self.filter.currentData(),'scroll':self.list.verticalScrollBar().value(),'tab':self.tabs.currentIndex()}})
+            'ui_state':{'selected':self.current_id,'search':self.search.text(),'filter':self.filter_group.checkedButton().property('status'),'scroll':self.list.verticalScrollBar().value(),
+                        'article_order':self.order_group.checkedButton().property('order'),
+                        'page':'discord' if self.tabs.currentWidget() is self.discord_panel else 'management'}})
         failures = [key + ": " + error for key, error in results.items() if error]
         if failures:
             self.fail("画面設定の一部を保存できません: " + "\n".join(failures))
@@ -999,14 +1172,8 @@ class MainWindow(QMainWindow):
                 self.command_server.server.close()
             event.accept()
             return
-        if self.tray.isVisible():
-            self.persist_layout()
-            self.hide()
-            self.tray.showMessage("noteストック", "トレイで動作を続けています。終了はトレイメニューから行えます。", QSystemTrayIcon.MessageIcon.Information, 4000)
-            event.ignore()
-        else:
-            event.ignore()
-            self.quit_app()
+        event.ignore()
+        self.quit_app()
 
     def quit_app(self):
         if self.busy() and self.worker.action=='edit':
@@ -1030,17 +1197,32 @@ class MainWindow(QMainWindow):
             arguments=['--close-browser','--data-dir',str(self.store.root)]
             if not getattr(sys,'frozen',False):
                 arguments.insert(0,str(app_folder()/'main.py'))
-            self.browser_cleanup.finished.connect(lambda *args:self.final_exit())
-            self.browser_cleanup.errorOccurred.connect(lambda *args:self.final_exit())
+            self.browser_cleanup.finished.connect(self.browser_cleanup_finished)
+            self.browser_cleanup.errorOccurred.connect(self.browser_cleanup_failed)
             self.browser_cleanup.start(sys.executable,arguments)
             self.notify('専用ブラウザーを終了しています。')
             return
         self.final_exit()
 
+    def browser_cleanup_finished(self, code, _status):
+        if code:
+            from .diagnostics import Diagnostics
+            Diagnostics(self.store).error('browser_cleanup_error',exit_code=code)
+        self.final_exit()
+
+    def browser_cleanup_failed(self, error):
+        from .diagnostics import Diagnostics
+        Diagnostics(self.store).error('browser_cleanup_process_error',reason=error.name)
+        if error==QProcess.ProcessError.FailedToStart:
+            self.final_exit()
+
     def final_exit(self):
+        from .relogin import manager
+        manager(self.store).stop()
+        from .schedule_activity import stop_host
+        stop_host(self.store)
         if hasattr(self,'discord_panel') and not self.discord_panel.shutdown():
             QTimer.singleShot(500,self.final_exit)
             return
-        self.tray.hide()
         self.close()
         QApplication.instance().quit()

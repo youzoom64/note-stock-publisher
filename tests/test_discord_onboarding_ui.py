@@ -79,3 +79,44 @@ def test_discord_cli_status_never_discloses_secrets(tmp_path):
     assert result['ok'] and result['result']['configured']
     assert 'never-disclose' not in str(result)
     assert not Commands(store).handle({'command':'discord','data':{'action':'setup'}})['ok']
+
+
+def test_connection_buttons_show_actual_in_progress_state(tmp_path,monkeypatch):
+    from PySide6.QtWidgets import QWidget
+    from types import SimpleNamespace
+
+    app=QApplication.instance() or QApplication([])
+    window=QWidget()
+    window.store=Store(tmp_path)
+    window.store.set_setting('discord_token','placeholder')
+    window.notify=lambda *_:None
+    panel=DiscordPanel(window,connect_on_start=False)
+    class Bot:
+        alive=False
+        stopped=0
+        def start(self): self.alive=True
+        def is_alive(self): return self.alive
+        def stop(self): self.stopped+=1
+    monkeypatch.setattr('note_stock.discord_bot.BotThread',lambda store:Bot())
+    window.show()
+    panel.show()
+    app.processEvents()
+    panel.connect_button.click()
+    assert panel.connect_button.text()=='接続中…'
+    window.store.set_setting('discord_connection','管理メニュー準備完了')
+    panel.update_connection_action()
+    assert panel.connect_button.text()=='接続・再接続'
+    original=panel.bot
+    panel.connect_button.click()
+    assert panel.connect_button.text()=='再接続中…' and original.stopped==1
+    original.alive=False
+    panel.update_connection_action()
+    assert panel.connect_button.text()=='接続中…' and panel.bot is not original
+    panel.disconnect_button.click()
+    assert panel.disconnect_button.text()=='切断中…'
+    panel.bot.alive=False
+    panel.update_connection_action()
+    assert panel.disconnect_button.text()=='Discord接続を停止'
+    assert window.store.setting('discord_connection')=='停止'
+    panel.poll.stop()
+    window.close()

@@ -105,8 +105,27 @@ class NoteBrowser:
 
     def login(self, expected):
         expected = account_id(expected)
+        from playwright.sync_api import TimeoutError as BrowserTimeout
+
+        login_url = self.CORE + '/login'
+        try:
+            self.page.goto(login_url, wait_until='domcontentloaded', timeout=20000)
+        except BrowserTimeout as exc:
+            raise VerificationFailed('noteのログインページを20秒以内に読み込めませんでした。ブラウザーで表示を確認してください。') from exc
         self.progress("専用ブラウザーでnoteにログインしてください。接続確認は最大15分待ちます。")
-        actual = self.identity(wait=900)
+        deadline = time.monotonic() + 900
+        while time.monotonic() < deadline:
+            if self.cancelled():
+                raise RuntimeError('接続確認を中止しました。')
+            location = urlparse(self.page.url)
+            section = location.path.strip('/').split('/',1)[0]
+            if (location.scheme == 'https' and location.hostname == 'note.com' and
+                    section not in {'login','signup','auth','oauth'}):
+                actual = self.identity()
+                break
+            self.page.wait_for_timeout(500)
+        else:
+            raise LoginRequired('noteへのログインを確認できませんでした。ログイン・接続確認からやり直してください。')
         if actual != expected:
             raise LoginRequired(f"ログイン先が異なります（現在: {actual} / 設定: {expected}）。専用ブラウザーでログイン先を切り替えてください。")
         return actual

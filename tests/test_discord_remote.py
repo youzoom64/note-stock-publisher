@@ -1,9 +1,11 @@
+from discord_test_support import sent_followups,article_buttons
 import asyncio
 import json
 from unittest.mock import AsyncMock
 import pytest
 from note_stock.store import Store,now_ts
 from note_stock.remote import submit
+from note_stock.discord_flow import flow
 from note_stock.discord_bot import NoteClient,Menu,Articles,ArticleView,Confirm,authorized
 
 
@@ -22,7 +24,7 @@ def ui_interaction(number=1,message=99):
         message=source,extras={},original_response=AsyncMock(return_value=source),edit_original_response=AsyncMock(return_value=source),
         delete_original_response=AsyncMock(),
         response=SimpleNamespace(edit_message=AsyncMock(),send_message=AsyncMock(),send_modal=AsyncMock(),defer=AsyncMock()),
-        followup=SimpleNamespace(send=AsyncMock()))
+        followup=SimpleNamespace(send=sent_followups()))
 
 
 def configure_ui(store):
@@ -53,20 +55,17 @@ def test_unread_article_disables_actions_and_never_claims_free_price(tmp_path):
     asyncio.run(run())
 
 
-def test_only_latest_view_and_canonical_menu_accept_interactions(tmp_path):
+def test_only_rendered_latest_view_and_canonical_menu_accept_interactions(tmp_path):
     async def run():
-        store=Store(tmp_path); configure_ui(store); client=NoteClient(store)
-        old=Articles(client); latest=Articles(client)
+        store=Store(tmp_path);configure_ui(store);client=NoteClient(store);i=ui_interaction()
+        root=Menu(client,root=True);flow(client).install(root,i.message)
+        assert await root.interaction_check(ui_interaction())
+        old=Articles(client);flow(client).install(old,i.message)
+        latest=Articles(client);flow(client).install(latest,i.message)
         assert not await old.interaction_check(ui_interaction())
         assert await latest.interaction_check(ui_interaction())
-        root=Menu(client,root=True)
-        assert not await root.interaction_check(ui_interaction(message=98))
-        assert not root.is_finished()  # A stale message must not unregister the persistent menu.
-        i=ui_interaction(message=99)
-        assert await root.interaction_check(i)
-        assert i.extras['note_ui_session']==store.setting('discord_active_ui')
-        assert not await latest.interaction_check(ui_interaction())
-        assert store.next_job() is None
+        assert not await root.interaction_check(ui_interaction())
+        assert not root.is_finished()
         await client.close()
     asyncio.run(run())
 
@@ -74,27 +73,22 @@ def test_only_latest_view_and_canonical_menu_accept_interactions(tmp_path):
 def test_stale_confirmation_and_modal_cannot_enqueue_or_invalidate_latest(tmp_path):
     from note_stock.discord_bot import TagsModal
     async def run():
-        store=Store(tmp_path); configure_ui(store); client=NoteClient(store)
-        pid=store.create({'title':'a','body':'b'})
-        old=Confirm(client,store.get(pid),'delete_note')
-        modal=TagsModal(client,pid)
-        latest=Articles(client); session=latest.session
-        # Simulate a callback that already passed Discord's interaction_check.
-        i=ui_interaction(); await old.yes.callback(i)
-        assert '最新' in i.followup.send.call_args.args[0]
-        assert 'view' not in i.followup.send.call_args.kwargs
-        i=ui_interaction(); await modal.on_submit(i)
-        assert '最新' in i.response.send_message.call_args.args[0]
-        assert store.setting('discord_active_ui')==session
-        assert store.next_job() is None
+        store=Store(tmp_path);configure_ui(store);client=NoteClient(store)
+        pid=store.create({'title':'a','body':'b'});old=Confirm(client,store.get(pid),'delete_note')
+        flow(client).install(old,ui_interaction().message);modal=TagsModal(client,pid)
+        latest=Articles(client);flow(client).install(latest,ui_interaction().message);session=latest.session
+        for callback in [old.yes.callback,modal.on_submit]:
+            i=ui_interaction();await callback(i)
+            i.followup.send.assert_not_awaited();i.response.send_message.assert_not_awaited()
+            i.edit_original_response.assert_not_awaited();i.message.delete.assert_not_awaited()
+        assert store.setting('discord_active_ui')==session and store.next_job() is None
         await client.close()
     asyncio.run(run())
 
 
 def test_session_consumption_is_atomic_across_distinct_simultaneous_clicks(tmp_path):
     from concurrent.futures import ThreadPoolExecutor
-    from note_stock.discord_bot import new_ui_session
-    store=Store(tmp_path); session=new_ui_session(store)
+    store=Store(tmp_path); session='displayed-test-screen';store.set_setting('discord_active_ui',session)
     def click(key):
         try: return store.enqueue('sync_articles',request_key=key,ui_session=session)
         except ValueError: return None
@@ -107,19 +101,22 @@ def test_session_consumption_is_atomic_across_distinct_simultaneous_clicks(tmp_p
         assert c.execute('SELECT COUNT(*) FROM jobs').fetchone()[0]==1
 
 
-def test_current_confirmation_queues_once_and_cancel_returns_to_article(tmp_path):
+def test_current_confirmation_queues_once_and_cancel_creates_one_result(tmp_path):
     async def run():
         store=Store(tmp_path); configure_ui(store); client=NoteClient(store)
         pid=store.create({'title':'a','body':'b'})
         confirm=Confirm(client,store.get(pid),'delete_note')
+        flow(client).install(confirm,ui_interaction().message)
         await confirm.yes.callback(ui_interaction(1))
         await confirm.yes.callback(ui_interaction(2))
         with store.connect() as c:
             assert c.execute('SELECT COUNT(*) FROM jobs').fetchone()[0]==1
         cancel=Confirm(client,store.get(pid),'delete_note',('draft',0,'a'))
         i=ui_interaction(3); await cancel.no.callback(i)
-        view=i.response.edit_message.call_args.kwargs['view']
-        assert isinstance(view,ArticleView) and view.listing==('draft',0,'a')
+        assert i.edit_original_response.call_args.kwargs['view'] is None
+        records=store.pending_notifications()
+        assert len(records)==1 and records[0][1]['ok'] and '取り消し' in records[0][1]['message']
+        with store.connect() as c: assert c.execute('SELECT COUNT(*) FROM jobs').fetchone()[0]==1
         await client.close()
     asyncio.run(run())
 
@@ -160,6 +157,45 @@ def test_reconnect_reuses_private_channel_without_rewriting_its_permissions(tmp_
     channel.edit.assert_not_called()
     guild.create_category.assert_not_called()
     guild.create_text_channel.assert_not_called()
+
+
+@pytest.mark.parametrize('old_marker_visible',[True,False])
+def test_new_bot_uses_its_own_private_channel_in_existing_server(tmp_path,old_marker_visible):
+    import discord
+    from types import SimpleNamespace
+
+    class Target:
+        def __init__(self,id): self.id=id
+
+    store=Store(tmp_path)
+    store.set_setting('discord',{'guild':'123','channel':'22','category':'21','menu':'23','installation':'new'})
+    owner=Target(42)
+    owner.guild_permissions=SimpleNamespace(manage_guild=True)
+    role,bot=Target(1),Target(55)
+    inaccessible=discord.Forbidden(SimpleNamespace(status=403,reason='Forbidden'),{'code':50001,'message':'Missing Access'})
+    old=SimpleNamespace(id=22,topic='note-stock:44:old' if old_marker_visible else None,
+                        category_id=21,overwrites={},edit=AsyncMock(side_effect=inaccessible))
+    old_category=SimpleNamespace(id=21)
+    category=SimpleNamespace(id=31)
+    channel=SimpleNamespace(id=32,send=AsyncMock(return_value=SimpleNamespace(id=33)))
+    async def empty_history(**kwargs):
+        if False:
+            yield None
+    channel.history=empty_history
+    guild=SimpleNamespace(id=123,name='test',owner_id=42,fetch_member=AsyncMock(return_value=owner),
+        get_channel=lambda key:{21:old_category,22:old}.get(key),default_role=role,me=bot,text_channels=[old],
+        create_category=AsyncMock(return_value=category),create_text_channel=AsyncMock(return_value=channel))
+    fake=SimpleNamespace(store=store,guilds=[guild],get_guild=lambda _:guild,user=bot,
+        application_info=AsyncMock(return_value=SimpleNamespace(team=None,owner=owner,id=55)),
+        tree=SimpleNamespace(copy_global_to=lambda **kw:None,sync=AsyncMock()))
+    asyncio.run(NoteClient.prepare_channel(fake))
+    if old_marker_visible:
+        old.edit.assert_not_called()
+    else:
+        old.edit.assert_awaited_once()
+    permissions=guild.create_text_channel.await_args.kwargs['overwrites']
+    assert permissions[role].view_channel is False and permissions[bot].view_channel is True
+    assert store.setting('discord')['channel']=='32' and store.setting('discord')['menu']=='33'
 
 
 def test_jobs_survive_restart_deduplicate_and_do_not_resend_running(tmp_path):
@@ -277,7 +313,7 @@ def test_views_construct_persistently_and_page_long_catalog(tmp_path):
         assert Menu(client,root=True).is_persistent()
         assert not Menu(client).is_persistent()
         assert Articles(client).total==42
-        assert Articles(client,page=2).next.disabled
+        assert Articles(client,page=4).next.disabled
         post=store.posts()[0]
         ArticleView(client,post)
         Confirm(client,post,'delete_note')
@@ -289,28 +325,27 @@ def test_views_construct_persistently_and_page_long_catalog(tmp_path):
 
 def test_article_back_preserves_search_page_and_does_not_change_article_or_queue(tmp_path):
     from types import SimpleNamespace
-    from note_stock.discord_bot import ArticleSelect
     async def run():
         store=Store(tmp_path)
         for n in range(42): store.create({'title':'対象 '+str(n),'body':'test'})
         store.create({'title':'対象外の別記事','body':'other'})
         client=NoteClient(store)
         listing=Articles(client,'all',1,'対象 ')
-        select=next(item for item in listing.children if isinstance(item,ArticleSelect))
-        original_options=[item.value for item in select.options]
+        original_options=[item['id'] for item in listing.selected]
         pid=original_options[0]; before=store.get(pid)
-        select._values=[pid]
-        interaction=SimpleNamespace(response=SimpleNamespace(edit_message=AsyncMock(),send_message=AsyncMock()))
-        await select.callback(interaction)
+        flow(client).install(listing,ui_interaction().message)
+        row=listing.parts[0]
+        configure_ui(store)
+        interaction=ui_interaction()
+        await article_buttons(row)[0].callback(interaction)
         detail=interaction.response.edit_message.call_args.kwargs['view']
-        assert isinstance(detail,ArticleView) and detail.listing==('all',1,'対象 ')
+        assert isinstance(detail,ArticleView) and detail.listing==('all',1,'対象 ',30)
         assert listing.is_finished()
         interaction.response.edit_message.reset_mock()
         await detail.back.callback(interaction)
         restored=interaction.response.edit_message.call_args.kwargs['view']
-        restored_select=next(item for item in restored.children if isinstance(item,ArticleSelect))
         assert (restored.kind,restored.page,restored.query)==('all',1,'対象 ')
-        assert [item.value for item in restored_select.options]==original_options
+        assert [item['id'] for item in restored.selected]==original_options
         assert detail.is_finished() and store.get(pid)==before
         interaction.response.send_message.assert_not_awaited()
         with store.connect() as connection:
@@ -402,8 +437,8 @@ def test_previous_screen_expires_before_any_stale_button_click(tmp_path):
     from types import SimpleNamespace
     async def run():
         store=Store(tmp_path); configure_ui(store); client=NoteClient(store)
-        old=Articles(client); old.message=SimpleNamespace(id=100,edit=AsyncMock(),delete=AsyncMock())
-        current=Articles(client); current.message=SimpleNamespace(id=101,edit=AsyncMock(),delete=AsyncMock())
+        old=Articles(client); old.message=SimpleNamespace(id=100,edit=AsyncMock(),delete=AsyncMock()); flow(client).install(old,old.message)
+        current=Articles(client); current.message=SimpleNamespace(id=101,edit=AsyncMock(),delete=AsyncMock()); flow(client).install(current,current.message)
         await client.retire_views(current)
         old.message.delete.assert_awaited_once()
         old.message.edit.assert_not_awaited()
@@ -418,8 +453,8 @@ def test_replacing_same_message_never_overwrites_new_controls_with_expired_scree
     from types import SimpleNamespace
     async def run():
         store=Store(tmp_path); client=NoteClient(store)
-        old=Articles(client); old.message=SimpleNamespace(id=100,edit=AsyncMock(),delete=AsyncMock())
-        current=Menu(client); current.message=SimpleNamespace(id=100,edit=AsyncMock(),delete=AsyncMock())
+        old=Articles(client); old.message=SimpleNamespace(id=100,edit=AsyncMock(),delete=AsyncMock()); flow(client).install(old,old.message)
+        current=Menu(client); current.message=SimpleNamespace(id=100,edit=AsyncMock(),delete=AsyncMock()); flow(client).install(current,current.message)
         await client.retire_views(current)
         old.message.edit.assert_not_awaited()
         old.message.delete.assert_not_awaited()
@@ -432,8 +467,8 @@ def test_late_retirement_never_deletes_newer_view_on_same_message(tmp_path):
     from types import SimpleNamespace
     async def run():
         store=Store(tmp_path); client=NoteClient(store)
-        old=Articles(client); old.message=SimpleNamespace(id=100,edit=AsyncMock(),delete=AsyncMock())
-        current=Menu(client); current.message=old.message
+        old=Articles(client); old.message=SimpleNamespace(id=100,edit=AsyncMock(),delete=AsyncMock()); flow(client).install(old,old.message)
+        current=Menu(client); current.message=old.message; flow(client).install(current,current.message)
         await client.retire_views(old)
         old.message.delete.assert_not_awaited()
         old.message.edit.assert_not_awaited()
@@ -447,8 +482,8 @@ def test_expired_private_menu_removes_buttons_without_waiting_for_a_click(tmp_pa
     from types import SimpleNamespace
     async def run():
         store=Store(tmp_path); client=NoteClient(store)
-        menu=Menu(client); menu.message=SimpleNamespace(id=100,edit=AsyncMock(),delete=AsyncMock())
-        client.send_menu=AsyncMock()
+        menu=Menu(client); menu.message=SimpleNamespace(id=100,edit=AsyncMock(),delete=AsyncMock()); flow(client).install(menu,menu.message)
+        client.send_menu=AsyncMock(side_effect=lambda:store.set_setting("discord_active_ui","new-menu"))
         assert menu.timeout==600
         await menu.on_timeout()
         menu.message.delete.assert_awaited_once()
@@ -520,11 +555,10 @@ def test_renamed_slash_commands_use_guards_and_publication_confirmation(tmp_path
 
 @pytest.mark.parametrize('superseded',[False,True])
 def test_new_command_cannot_save_after_a_new_menu_supersedes_it(tmp_path,superseded):
-    from note_stock.discord_bot import new_ui_session
     async def run():
         store=Store(tmp_path); configure_ui(store); client=NoteClient(store)
         i=ui_interaction(message=None)
-        if superseded: i.response.defer.side_effect=lambda **kw:new_ui_session(store)
+        if superseded: i.response.defer.side_effect=lambda **kw:store.set_setting('discord_active_ui','superseded')
         await client.tree.get_command('note_new').callback(i,title='test',body='body')
         assert len(store.posts())==(0 if superseded else 1)
         job=store.next_job()
@@ -534,7 +568,6 @@ def test_new_command_cannot_save_after_a_new_menu_supersedes_it(tmp_path,superse
 
 
 def test_menu_article_back_round_trip_only_edits_one_message(tmp_path):
-    from note_stock.discord_bot import ArticleSelect
     async def run():
         store=Store(tmp_path); configure_ui(store); client=NoteClient(store)
         pid=store.create({'title':'sample','body':'body'})
@@ -542,8 +575,8 @@ def test_menu_article_back_round_trip_only_edits_one_message(tmp_path):
         menu=Menu(client,root=True)
         await menu.articles.callback(interaction)
         listing=interaction.response.edit_message.call_args.kwargs['view']
-        select=next(item for item in listing.children if isinstance(item,ArticleSelect))
-        select._values=[pid]; await select.callback(interaction)
+        flow(client).install(listing,ui_interaction().message)
+        await article_buttons(listing.parts[0])[0].callback(interaction)
         detail=interaction.response.edit_message.call_args.kwargs['view']
         await detail.back.callback(interaction)
         restored=interaction.response.edit_message.call_args.kwargs['view']
@@ -554,7 +587,7 @@ def test_menu_article_back_round_trip_only_edits_one_message(tmp_path):
         await returned.articles.callback(interaction)
         assert interaction.response.edit_message.await_count==5
         interaction.response.send_message.assert_not_awaited()
-        interaction.followup.send.assert_not_awaited()
+        assert all(call.kwargs.get("view") is not None for call in interaction.followup.send.call_args_list)
         interaction.message.edit.assert_not_awaited()
         client.http.edit_message.assert_not_awaited()
         assert store.next_job() is None

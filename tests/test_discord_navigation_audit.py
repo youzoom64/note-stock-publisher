@@ -1,18 +1,20 @@
+from discord_test_support import sent_followups,article_buttons
 """Audit every return route without publishing, deleting, or creating real articles."""
 import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 import pytest
 from note_stock.store import Store,now_ts
-from note_stock.discord_bot import (NoteClient,Menu,Articles,ArticleView,InfoView,ActionResult,
-    Confirm,ScheduleConfirm,ScheduleModal,TagsModal,NewModal,ArticleSelect,OperationHistory,RECORD_FOOTER)
+from note_stock.discord_flow import flow
+from note_stock.discord_bot import (NoteClient,Menu,Articles,ArticleView,InfoView,
+    Confirm,TagsModal,NewModal,OperationHistory,RECORD_FOOTER)
 
 
 def interaction(message=99):
     source=SimpleNamespace(id=message,edit=AsyncMock(),delete=AsyncMock()) if message is not None else None
     return SimpleNamespace(id=1000,user=SimpleNamespace(id=1),guild_id=2,channel_id=3,message=source,extras={},
         response=SimpleNamespace(edit_message=AsyncMock(),send_message=AsyncMock(),send_modal=AsyncMock(),defer=AsyncMock()),
-        followup=SimpleNamespace(send=AsyncMock()),original_response=AsyncMock(return_value=source),
+        followup=SimpleNamespace(send=sent_followups()),original_response=AsyncMock(return_value=source),
         edit_original_response=AsyncMock(return_value=source))
 
 
@@ -36,114 +38,53 @@ def test_each_menu_page_has_a_working_home_route_on_the_same_message(tmp_path,pa
         await view.back.callback(i)
         assert isinstance(i.response.edit_message.call_args.kwargs['view'],Menu)
         assert i.response.edit_message.await_count==2
-        i.response.send_message.assert_not_awaited(); i.followup.send.assert_not_awaited()
+        i.response.send_message.assert_not_awaited()
+        assert all(message.delete.await_count==1 for message in i.followup.send.messages)
         i.message.edit.assert_not_awaited(); client.http.edit_message.assert_not_awaited()
         assert store.next_job() is None
         await client.close()
     asyncio.run(run())
 
 
-@pytest.mark.parametrize('route,expected',[('back',Articles),('home',Menu)])
-def test_action_receipt_can_return_to_list_or_home_without_more_messages(tmp_path,route,expected):
-    async def run():
-        store,client=setup(tmp_path); i=interaction(); view=ActionResult(client)
-        view.message=i.message; view.message_id=99
-        await getattr(view,route).callback(i)
-        assert isinstance(i.response.edit_message.call_args.kwargs['view'],expected)
-        i.response.send_message.assert_not_awaited(); i.followup.send.assert_not_awaited()
-        i.message.edit.assert_not_awaited()
-        assert store.next_job() is None
-        await client.close()
-    asyncio.run(run())
-
-
-@pytest.mark.parametrize('kind',['publish','delete','schedule'])
-def test_cancel_confirmation_preserves_article_list_context_and_can_return_home(tmp_path,kind):
+@pytest.mark.parametrize('kind',['publish','delete'])
+def test_cancel_confirmation_records_result_without_mutating_article(tmp_path,kind):
     async def run():
         store,client=setup(tmp_path)
         for n in range(42): store.create({'title':'対象 '+str(n),'body':'body'})
         post=store.posts()[0]; listing=('all',1,'対象 ')
-        view=ScheduleConfirm(client,post['id'],now_ts()+600,listing) if kind=='schedule' else Confirm(client,post,kind+'_note',listing)
+        view=Confirm(client,post,kind+'_note',listing)
         i=interaction(); await view.no.callback(i)
-        detail=i.response.edit_message.call_args.kwargs['view']
-        assert isinstance(detail,ArticleView) and detail.listing==listing
-        await detail.back.callback(i)
-        articles=i.response.edit_message.call_args.kwargs['view']
-        assert (articles.kind,articles.page,articles.query)==listing
-        await articles.back.callback(i)
-        assert isinstance(i.response.edit_message.call_args.kwargs['view'],Menu)
-        assert i.response.edit_message.await_count==3
+        assert i.edit_original_response.call_args.kwargs['view'] is None
+        records=store.pending_notifications()
+        assert len(records)==1 and records[0][1]['ok'] and '取り消し' in records[0][1]['message']
         i.response.send_message.assert_not_awaited(); i.followup.send.assert_not_awaited()
         assert store.get(post['id'])==post and store.next_job() is None
         await client.close()
     asyncio.run(run())
 
 
-def test_invalid_schedule_returns_to_article_with_retry_and_back_buttons(tmp_path):
+@pytest.mark.parametrize('problem',['missing-title','invalid-tags','slash-empty','invalid-article-tags'])
+def test_validation_failures_record_result_and_queue_no_mutation(tmp_path,problem):
     async def run():
-        store,client=setup(tmp_path); pid=store.create({'title':'sample','body':'body'})
-        with store.connect() as c: c.execute('UPDATE posts SET native_ready=1 WHERE id=?',(pid,))
-        ArticleView(client,store.get(pid))
-        modal=ScheduleModal(client,pid); modal.when._value='invalid date'
-        i=interaction(); await modal.on_submit(i)
-        assert '日本時間' in i.response.edit_message.call_args.kwargs['content']
-        assert 'does not match' not in i.response.edit_message.call_args.kwargs['content']
-        detail=i.response.edit_message.call_args.kwargs['view']
-        assert isinstance(detail,ArticleView)
-        assert not detail.schedule.disabled
-        await detail.back.callback(i)
-        await i.response.edit_message.call_args.kwargs['view'].back.callback(i)
-        assert isinstance(i.response.edit_message.call_args.kwargs['view'],Menu)
-        i.response.send_message.assert_not_awaited()
+        store,client=setup(tmp_path);i=interaction()
+        flow(client).install(Menu(client),i.message)
+        if problem=='slash-empty':
+            await client.tree.get_command('note_new').callback(interaction(None),title='title',body='')
+        elif problem=='invalid-article-tags':
+            pid=store.create({'title':'sample','body':'body'})
+            with store.connect() as c:c.execute('UPDATE posts SET native_ready=1 WHERE id=?',(pid,))
+            before=store.get(pid);modal=TagsModal(client,pid);modal.tags._value='bad#tag'
+            await modal.on_submit(i)
+            assert store.get(pid)==before
+        else:
+            modal=NewModal(client);modal.name._value=' ' if problem=='missing-title' else 'title';modal.body._value='body'
+            if problem=='invalid-tags':modal.tags._value='bad#tag'
+            await modal.on_submit(i)
+            assert store.posts()==[]
+        records=store.pending_notifications()
+        assert len(records)==1 and not records[0][1]['ok']
         assert store.next_job() is None
-        await client.close()
-    asyncio.run(run())
-
-
-@pytest.mark.parametrize('problem',['missing-title','invalid-tags'])
-def test_new_draft_input_error_has_home_button_and_creates_no_draft(tmp_path,problem):
-    async def run():
-        store,client=setup(tmp_path); Menu(client)
-        modal=NewModal(client); modal.name._value=' ' if problem=='missing-title' else 'title'; modal.body._value='body'
-        if problem=='invalid-tags': modal.tags._value='bad#tag'
-        i=interaction(); await modal.on_submit(i)
-        view=i.edit_original_response.call_args.kwargs['view']
-        assert isinstance(view,InfoView)
-        await view.back.callback(i)
-        assert isinstance(i.response.edit_message.call_args.kwargs['view'],Menu)
-        i.followup.send.assert_not_awaited()
-        assert store.posts()==[] and store.next_job() is None
-        await client.close()
-    asyncio.run(run())
-
-
-def test_invalid_tag_submission_has_both_return_routes_without_changing_article(tmp_path):
-    async def run():
-        store,client=setup(tmp_path); pid=store.create({'title':'sample','body':'body'})
-        with store.connect() as c: c.execute('UPDATE posts SET native_ready=1 WHERE id=?',(pid,))
-        before=store.get(pid); ArticleView(client,before)
-        modal=TagsModal(client,pid); modal.tags._value='bad#tag'
-        i=interaction(); await modal.on_submit(i)
-        view=i.edit_original_response.call_args.kwargs['view']
-        assert isinstance(view,ActionResult) and not view.back.disabled and not view.home.disabled
-        await view.home.callback(i)
-        assert isinstance(i.response.edit_message.call_args.kwargs['view'],Menu)
-        i.followup.send.assert_not_awaited()
-        assert store.get(pid)==before and store.next_job() is None
-        await client.close()
-    asyncio.run(run())
-
-
-def test_new_draft_slash_error_has_home_button(tmp_path):
-    async def run():
-        store,client=setup(tmp_path); i=interaction(message=None)
-        await client.tree.get_command('note_new').callback(i,title='title',body='')
-        view=i.followup.send.call_args.kwargs['view']
-        assert isinstance(view,InfoView)
-        back=interaction(message=150); await view.back.callback(back)
-        assert isinstance(back.response.edit_message.call_args.kwargs['view'],Menu)
-        back.response.send_message.assert_not_awaited()
-        assert store.posts()==[] and store.next_job() is None
+        i.response.send_message.assert_not_awaited();i.followup.send.assert_not_awaited()
         await client.close()
     asyncio.run(run())
 
@@ -151,8 +92,8 @@ def test_new_draft_slash_error_has_home_button(tmp_path):
 def test_empty_filter_has_home_button_and_stays_on_same_message(tmp_path):
     async def run():
         store,client=setup(tmp_path); store.create({'title':'sample','body':'body'})
-        listing=Articles(client); listing.filter._values=['published']
-        i=interaction(); await listing.filter.callback(i)
+        listing=Articles(client)
+        i=interaction(); await listing.published.callback(i)
         empty=i.response.edit_message.call_args.kwargs['view']
         assert empty.total==0 and empty.kind=='published'
         await empty.back.callback(i)
@@ -164,14 +105,14 @@ def test_empty_filter_has_home_button_and_stays_on_same_message(tmp_path):
     asyncio.run(run())
 
 
-@pytest.mark.parametrize('route,modal_class',[('schedule',ScheduleModal),('tags',TagsModal),('new',NewModal)])
+@pytest.mark.parametrize('route,modal_class',[('tags',TagsModal),('new',NewModal)])
 def test_opening_modal_keeps_parent_usable_when_discord_cancels_input(tmp_path,route,modal_class):
     async def run():
         store,client=setup(tmp_path)
         pid=store.create({'title':'sample','body':'body'})
         with store.connect() as c: c.execute('UPDATE posts SET native_ready=1 WHERE id=?',(pid,))
         parent=Menu(client) if route=='new' else ArticleView(client,store.get(pid))
-        session=parent.session; i=interaction()
+        session=parent.session; i=interaction(); flow(client).install(parent,i.message)
         await getattr(parent,route).callback(i)
         assert isinstance(i.response.send_modal.call_args.args[0],modal_class)
         assert store.setting('discord_active_ui')==session
@@ -182,20 +123,25 @@ def test_opening_modal_keeps_parent_usable_when_discord_cancels_input(tmp_path,r
     asyncio.run(run())
 
 
-@pytest.mark.parametrize('kind',['select','confirm','schedule','publish','delete'])
+@pytest.mark.parametrize('kind',['select','confirm','publish','delete'])
 def test_missing_article_returns_to_list_instead_of_trapping_the_user(tmp_path,kind):
     async def run():
         store,client=setup(tmp_path); pid=store.create({'title':'sample','body':'body'})
         post=store.get(pid); i=interaction()
         if kind=='select':
-            view=ArticleSelect(client,[post]); view._values=[pid]
+            listing=Articles(client);flow(client).install(listing,i.message)
+            view=listing.parts[0]
         elif kind=='confirm': view=Confirm(client,post,'delete_note')
-        elif kind=='schedule': view=ScheduleConfirm(client,pid,now_ts()+600)
         else: view=ArticleView(client,post)
         store.delete(pid)
-        if kind=='select': await view.callback(i)
-        elif kind in {'confirm','schedule'}: await view.no.callback(i)
+        if kind=='select': await article_buttons(view)[0].callback(i)
+        elif kind=='confirm': await view.no.callback(i)
         else: await getattr(view,kind).callback(i)
+        if kind=='confirm':
+            assert len(store.pending_notifications())==1 and store.next_job() is None
+            assert i.edit_original_response.call_args.kwargs['view'] is None
+            await client.close()
+            return
         listing=i.response.edit_message.call_args.kwargs['view']
         assert isinstance(listing,Articles) and listing.total==0
         await listing.back.callback(i)
@@ -210,7 +156,7 @@ def test_saved_page_is_clamped_when_the_list_shrinks(tmp_path):
         store,client=setup(tmp_path); store.create({'title':'sample','body':'body'})
         listing=Articles(client,page=5)
         assert listing.page==0 and listing.prev.disabled and listing.next.disabled
-        assert any(isinstance(item,ArticleSelect) for item in listing.children)
+        assert listing.selected and listing.parts[0].children
         await client.close()
     asyncio.run(run())
 
@@ -279,18 +225,18 @@ def test_retry_after_result_send_does_not_send_the_execution_record_twice(tmp_pa
     asyncio.run(run())
 
 
-def test_execution_receipt_loses_controls_but_is_not_replaced_by_expired_text(tmp_path):
+def test_processing_screen_is_removed_when_the_new_menu_arrives(tmp_path):
     async def run():
         store,client=setup(tmp_path); pid=store.create({'title':'sample','body':'body'})
         i=interaction(); view=Confirm(client,store.get(pid),'delete_note')
-        view.message=i.message; view.message_id=99
+        flow(client).install(view,i.message)
         await view.yes.callback(i)
         receipt=i.edit_original_response.call_args.kwargs
-        assert receipt['content'].startswith('受付しました。') and receipt['view'] is None
+        assert receipt['content'].startswith('記事削除.') and receipt['view'] is None
         assert view not in client.operation_views
         assert not store.setting('discord')['menu']
         await client.activate_menu(200)
-        i.message.edit.assert_not_awaited(); client.http.edit_message.assert_not_awaited()
+        i.message.delete.assert_awaited_once(); client.http.edit_message.assert_not_awaited()
         assert i.edit_original_response.await_count==1
         await client.close()
     asyncio.run(run())

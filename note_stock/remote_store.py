@@ -4,6 +4,10 @@ import uuid
 from .store_time import timestamp
 
 
+class ObsoleteUI(ValueError):
+    """A consumed/superseded screen is not a user-visible operation result."""
+
+
 class RemoteStore:
     def init_remote(self):
         with self.connect() as c:
@@ -21,6 +25,10 @@ class RemoteStore:
                 CREATE TABLE IF NOT EXISTS incoming_drafts(request_key TEXT PRIMARY KEY,post_id TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS notification_messages(
                     notification_id TEXT PRIMARY KEY,result_id TEXT NOT NULL DEFAULT '',menu_id TEXT NOT NULL DEFAULT '');
+                CREATE TABLE IF NOT EXISTS job_receipts(
+                    job_id TEXT PRIMARY KEY,message_id TEXT NOT NULL,channel_id TEXT NOT NULL,
+                    application_id TEXT NOT NULL DEFAULT '',webhook_token TEXT NOT NULL DEFAULT '',
+                    removed INTEGER NOT NULL DEFAULT 0);
             ''')
 
     def incoming_draft(self,key,source):
@@ -48,7 +56,7 @@ class RemoteStore:
             if ui_session is not None:
                 current=c.execute('SELECT value FROM settings WHERE key=?',('discord_active_ui',)).fetchone()
                 if not current or json.loads(current['value'])!=ui_session:
-                    raise ValueError('最新の操作メニューからやり直してください。')
+                    raise ObsoleteUI()
                 c.execute('UPDATE settings SET value=? WHERE key=?',
                           (json.dumps('used:'+uuid.uuid4().hex),'discord_active_ui'))
             jid=uuid.uuid4().hex
@@ -92,7 +100,7 @@ class RemoteStore:
             if c.execute("SELECT 1 FROM jobs WHERE state='running'").fetchone():
                 return None
             row=c.execute("SELECT id FROM jobs WHERE state='waiting' "+
-                          ("" if browser_allowed else "AND action IN ('pause','resume','cancel_schedule') ")+
+                          ("" if browser_allowed else "AND action IN ('pause','resume','cancel_schedule','relogin_note') ")+
                           "ORDER BY created LIMIT 1").fetchone()
             if not row:
                 return None
@@ -104,7 +112,7 @@ class RemoteStore:
         with self.connect() as c:
             c.execute('UPDATE jobs SET state=?,result=?,updated=? WHERE id=?',
                       ('done' if ok else 'failed',json.dumps(result,ensure_ascii=False),timestamp(),jid))
-            if notify:
+            if notify and not c.execute("SELECT 1 FROM jobs WHERE id=? AND request_key LIKE 'reservation-preflight:%'",(jid,)).fetchone():
                 c.execute('INSERT OR IGNORE INTO notifications(id,body) VALUES(?,?)',
                           ('job:'+jid,json.dumps(result,ensure_ascii=False)))
 
@@ -122,6 +130,22 @@ class RemoteStore:
         with self.connect() as c:
             c.execute('UPDATE notifications SET delivered=1 WHERE id=?',(nid,))
 
+    def record_receipt(self,jid,message_id,channel_id,application_id='',webhook_token=''):
+        with self.connect() as c:
+            c.execute('INSERT OR REPLACE INTO job_receipts(job_id,message_id,channel_id,application_id,webhook_token) VALUES(?,?,?,?,?)',
+                (jid,str(message_id),str(channel_id),str(application_id),webhook_token))
+
+    def finished_receipts(self):
+        with self.connect() as c:
+            return [dict(r) for r in c.execute('''SELECT r.*,j.action FROM job_receipts r
+                JOIN jobs j ON j.id=r.job_id
+                JOIN notification_messages n ON n.notification_id='job:'||r.job_id
+                WHERE r.removed=0 AND n.result_id!='' AND n.menu_id!='' ''')]
+
+    def removed_receipt(self,jid):
+        with self.connect() as c:
+            c.execute("UPDATE job_receipts SET removed=1,webhook_token='' WHERE job_id=?",(jid,))
+
     def notification_message_ids(self,nid):
         with self.connect() as c:
             row=c.execute('SELECT result_id,menu_id FROM notification_messages WHERE notification_id=?',(nid,)).fetchone()
@@ -133,10 +157,10 @@ class RemoteStore:
             c.execute('INSERT OR IGNORE INTO notification_messages(notification_id) VALUES(?)',(nid,))
             c.execute('UPDATE notification_messages SET '+kind+'=? WHERE notification_id=?',(str(message_id),nid))
 
-    def notification(self,ok,message,url=''):
-        nid=uuid.uuid4().hex
+    def notification(self,ok,message,url='',key=None):
+        nid=key or uuid.uuid4().hex
         with self.connect() as c:
-            c.execute('INSERT INTO notifications(id,body) VALUES(?,?)',
+            c.execute('INSERT OR IGNORE INTO notifications(id,body) VALUES(?,?)',
                       (nid,json.dumps({'ok':ok,'message':message,'url':url},ensure_ascii=False)))
         return nid
 
@@ -162,8 +186,9 @@ class RemoteStore:
                     before=c.execute('SELECT remote_updated FROM catalog WHERE account=? AND note_key=?',(account,item['key'])).fetchone()
                     status=old['status']
                     remote=item['status']
+                    restored = remote == 'draft' and status in {'published', 'native_reserved', 'native_private'}
                     if status not in {'posting','editing','unknown'}:
-                        if remote=='published' and status not in {'scheduled','queued'}:
+                        if remote=='published':
                             status='published'
                         elif remote=='reserved':
                             status='native_reserved'
@@ -171,7 +196,7 @@ class RemoteStore:
                             status='native_private'
                         if before and before[0] and before[0]!=str(item.get('updated','')) and status in {'scheduled','queued'}:
                             status='review'
-                        if not row and remote=='draft':
+                        if restored or (not row and remote=='draft'):
                             status='draft'
                     url='https://note.com/'+account+'/n/'+item['key'] if remote=='published' else old['url']
                     # Never overwrite an input buffer or cached body with a list summary.
@@ -179,6 +204,11 @@ class RemoteStore:
                              (before is not None and before[0]!=str(item.get('updated',''))))
                     c.execute('UPDATE posts SET draft_key=?,native_owner=?,status=?,url=?,updated=? WHERE id=?',
                               (item['key'],account,status,url,stamp if changed else old['updated'],pid))
+                    if restored:
+                        c.execute("""UPDATE posts SET url='', due=NULL, submitted=0, error='',
+                                     native_ready=0, draft_restored_at=? WHERE id=?""", (stamp, pid))
+                    if status=='published':
+                        c.execute('UPDATE posts SET due=NULL WHERE id=?',(pid,))
                     if not old['native_ready'] and not old['body'] and old['status'] not in {'editing','posting'}:
                         c.execute('UPDATE posts SET title=? WHERE id=?',(item['title'],pid))
                     c.execute('INSERT OR REPLACE INTO catalog VALUES(?,?,?,?,?,?)',
@@ -203,8 +233,21 @@ class RemoteStore:
         with self.connect() as c:
             c.execute('BEGIN IMMEDIATE')
             row=c.execute('SELECT * FROM posts WHERE id=?',(pid,)).fetchone()
+            if due is not None:
+                self.require_schedulable(pid,connection=c)
             if not row or (due is not None and (not row['draft_key'] or not row['native_ready'])) or row['status'] in {'editing','posting','unknown','native_reserved'}:
                 raise ValueError('noteの保存と公開設定を確認してから予約してください。')
             c.execute('UPDATE posts SET status=?,due=?,error=?,updated=? WHERE id=?',
                       ('scheduled' if due else ('published' if row['url'] else 'draft'),due,'',timestamp(),pid))
+
+    def require_schedulable(self,pid,connection=None):
+        if connection is None:
+            with self.connect() as c:
+                return self.require_schedulable(pid,connection=c)
+        row=connection.execute('SELECT status,url FROM posts WHERE id=?',(pid,)).fetchone()
+        published=connection.execute("SELECT 1 FROM catalog WHERE post_id=? AND remote_status='published'",(pid,)).fetchone()
+        if row is None:
+            raise ValueError('記事が見つかりません。')
+        if row['status']=='published' or row['url'] or published:
+            raise ValueError('投稿済みの記事は予約できません。更新する場合は「今すぐ投稿・更新」を使ってください。')
 

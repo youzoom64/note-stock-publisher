@@ -17,6 +17,7 @@ COMMANDS={
     'delete':('noteから削除','note_delete'),
     'tags':('ハッシュタグ変更','note_tags'),
     'help':('コマンド一覧','note_help'),
+    'relogin':('Discord内でnoteへ再ログイン','note_relogin'),
 }
 
 

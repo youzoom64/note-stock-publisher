@@ -2,6 +2,7 @@
 import uuid
 import json
 from urllib.parse import urlparse
+from urllib.parse import urlparse
 
 
 def install(page, handler):

@@ -1,7 +1,10 @@
 """Discord onboarding and status controls, separate from article editing."""
-from PySide6.QtCore import QTimer,Qt
+import re
+
+from PySide6.QtCore import QTimer,Qt,QUrl
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (QWidget,QVBoxLayout,QHBoxLayout,QLabel,QPushButton,QComboBox,
-    QDialog,QRadioButton,QButtonGroup,QLineEdit,QStackedWidget,QCheckBox,QTableWidget,QTableWidgetItem,QHeaderView)
+    QDialog,QRadioButton,QButtonGroup,QLineEdit,QStackedWidget,QCheckBox,QTableWidget,QTableWidgetItem,QHeaderView,QMessageBox)
 from .discord_commands import COMMANDS,command_names
 
 
@@ -19,6 +22,7 @@ class DiscordCommandDialog(QDialog):
         self.table.verticalHeader().hide()
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.table.setAccessibleName('Discordコマンド名')
+        self.table.setAlternatingRowColors(True)
         layout.addWidget(self.table)
         self.keys=list(COMMANDS)
         names=command_names(values)
@@ -59,6 +63,17 @@ class DiscordSetupDialog(QDialog):
                            'Discordから記事の確認や予約投稿を操作できます。操作を受けるPCは起動したままにしてください。\n'
                            '連携しなくても、PCで編集・投稿管理を使えます。後から設定もできます。')
         explanation.setWordWrap(True); form.addWidget(explanation)
+        overview = QLabel(
+            '「使う」を選んだ後の流れ\n'
+            '1. Botを入れるサーバーを選び、必要な規約を確認します。\n'
+            '2. 「設定を開始」を押すと、ブラウザーでDiscordの開発者ポータルが開きます。'
+            '必要に応じてDiscordにログインし、本人確認やBotの導入を承認してください。'
+            'Chromeへのログインは不要です。\n'
+            '3. Discordの「アプリを新規作成する」画面では、noteストックが「作成」を押します。'
+            'そのままお待ちください。完了すると「note管理」から操作できます。')
+        overview.setWordWrap(True)
+        overview.setObjectName('notice')
+        form.addWidget(overview)
         self.use=QRadioButton('使う'); self.skip=QRadioButton('今は使わない')
         self.integration=QButtonGroup(self)
         for radio in (self.use,self.skip):
@@ -87,6 +102,18 @@ class DiscordSetupDialog(QDialog):
         self.new.toggled.connect(self.guidelines.setVisible)
         self.new.toggled.connect(self.guidelines_link.setVisible)
         self.guidelines.toggled.connect(self.update_controls)
+        self.login_guide=QLabel(
+            '次に、ブラウザーでDiscordの「Developer Portal（開発者ポータル）」が開きます。\n'
+            'このアプリ専用のBotを作成・設定するために使います。\n'
+            'ログイン画面が出たら、中央の「Log In」から自分のDiscordアカウントでログインしてください。'
+            'ブラウザー自体へのログインは不要です。\n'
+            '「アプリを新規作成する」画面が出たら、そのままお待ちください。'
+            'noteストックが「作成」を押してBotを設定します。\n'
+            '本人確認（パスワード・二段階認証・CAPTCHA）が出た場合は、Discordの画面で完了してください。'
+            '既存サーバーを使う場合は、導入画面でサーバーを選んでください。')
+        self.login_guide.setWordWrap(True)
+        self.login_guide.setObjectName('notice')
+        form.addWidget(self.login_guide)
         self.developer_terms=QCheckBox('開発者向け利用規約・開発者ポリシーに同意し、専用Botを自動作成・導入する')
         self.developer_terms.setVisible(not state.get('has_application',False))
         self.needs_bot=not state.get('has_application',False)
@@ -127,6 +154,7 @@ class DiscordPanel(QWidget):
         self.window,self.store=window,window.store
         self.setup_worker=None
         self.bot=None
+        self.connection_action=None
         layout=QVBoxLayout(self)
         title=QLabel('スマホのDiscordからnoteを管理')
         title.setObjectName('section')
@@ -140,17 +168,27 @@ class DiscordPanel(QWidget):
         self.enabled.clicked.connect(self.toggle_integration)
         layout.addWidget(self.enabled)
         row=QHBoxLayout()
-        for caption,handler in [('Discord連携を設定・変更',self.setup),('接続・再接続',self.connect_bot),('Discord接続を停止',self.stop_bot)]:
-            button=QPushButton(caption)
-            button.clicked.connect(handler)
+        setup_button=QPushButton('Discord連携を設定・変更')
+        setup_button.clicked.connect(self.setup)
+        self.connect_button=QPushButton('接続・再接続')
+        self.connect_button.clicked.connect(self.connect_bot)
+        self.disconnect_button=QPushButton('Discord接続を停止')
+        self.disconnect_button.clicked.connect(self.request_disconnect)
+        for button in (setup_button,self.connect_button,self.disconnect_button):
             row.addWidget(button)
         layout.addLayout(row)
+        self.open_application=QPushButton('Discordアプリページを開く')
+        self.open_application.clicked.connect(self.open_discord_application)
+        layout.addWidget(self.open_application)
         commands=QPushButton('コマンド名の設定')
         commands.clicked.connect(self.configure_commands)
         layout.addWidget(commands)
         self.status=QLabel('未設定')
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
+        reservation=QPushButton('追加設定：予約用Web画面の接続')
+        reservation.clicked.connect(self.configure_reservation)
+        layout.addWidget(reservation)
         layout.addWidget(QLabel('管理サーバー（Bot接続後に選択）'))
         self.guilds=QComboBox()
         self.guilds.setPlaceholderText('Botを導入して接続すると表示されます')
@@ -162,11 +200,15 @@ class DiscordPanel(QWidget):
         self.poll=QTimer(self)
         self.poll.timeout.connect(self.refresh)
         self.poll.start(2000)
+        self.connection_poll=QTimer(self)
+        self.connection_poll.setInterval(150)
+        self.connection_poll.timeout.connect(self.update_connection_action)
         self.guild_snapshot=None
         self.refresh()
         if connect_on_start and self.store.setting('discord_enabled',True) and self.store.setting('discord_token',''):
             QTimer.singleShot(0,self.connect_bot)
     def refresh(self):
+        self.open_application.setVisible(bool(self.discord_application_id()))
         if not (self.setup_worker and self.setup_worker.isRunning()):
             self.status.setText(self.store.setting('discord_connection','未接続'))
         guilds=self.store.setting('discord_guilds',[])
@@ -178,6 +220,16 @@ class DiscordPanel(QWidget):
             configured=self.store.setting('discord',{}).get('guild')
             self.guilds.setCurrentIndex(self.guilds.findData(selected or configured))
             self.guild_snapshot=guilds
+    def discord_application_id(self):
+        installed=self.store.setting('discord',{}).get('application')
+        state=self.store.setting('discord_setup',{})
+        return next((str(value) for value in (installed,state.get('application'))
+                     if value!=state.get('missing_application') and re.fullmatch(r'[0-9]{16,22}',str(value))),None)
+    def open_discord_application(self):
+        from .discord_setup import PORTAL
+        app=self.discord_application_id()
+        if app and not QDesktopServices.openUrl(QUrl(f'{PORTAL}/{app}/information')):
+            self.window.notify('Discordアプリページをブラウザーで開けませんでした。',True)
     def configure_commands(self):
         dialog=DiscordCommandDialog(self,self.store.setting('discord_commands',{}))
         if dialog.exec()!=QDialog.DialogCode.Accepted: return
@@ -186,15 +238,42 @@ class DiscordPanel(QWidget):
             self.connect_bot()
         else:
             self.window.notify('コマンド名を保存しました。次回のDiscord接続時に反映します。')
+    def configure_reservation(self):
+        from .schedule_activity_ui import ActivitySettings
+        ActivitySettings(self.store,self).exec()
     def setup(self):
         if self.setup_worker and self.setup_worker.isRunning(): return
+        from .discord_setup import PortalSetup, replace_missing_application
+        setup_state=self.store.setting('discord_setup',{})
+        missing=setup_state.get('missing_application')
+        replace=False
+        if missing and missing==setup_state.get('application'):
+            prompt=QMessageBox(self)
+            prompt.setWindowTitle('Discordアプリが見つかりません')
+            prompt.setText('Discord側でBotを削除した場合は、新しいBotで設定し直してください。前のサーバー設定は残ります。'
+                           '\n別のDiscordアカウントで開いていた場合は、同じBotを再確認できます。')
+            create=prompt.addButton('新しいBotで設定',QMessageBox.ButtonRole.AcceptRole)
+            retry=prompt.addButton('同じBotを再確認',QMessageBox.ButtonRole.ActionRole)
+            cancel=prompt.addButton(QMessageBox.StandardButton.Cancel)
+            prompt.setDefaultButton(cancel)
+            prompt.exec()
+            replace=prompt.clickedButton() is create
+            if not replace and prompt.clickedButton() is not retry:
+                return
         state=dict(self.store.setting('discord_onboarding',{}))
-        state['has_application']=bool(self.store.setting('discord_setup',{}).get('application'))
+        state['has_application']=bool(setup_state.get('application')) and not replace
         dialog=DiscordSetupDialog(self,state)
         if dialog.exec()!=QDialog.DialogCode.Accepted:
             self.enabled.setChecked(self.store.setting('discord_enabled',bool(self.store.setting('discord_token',''))))
             return
         choice=dialog.selection()
+        if replace and choice['enabled']:
+            try:
+                self.stop_bot()
+                replace_missing_application(self.store,missing)
+            except (ValueError,OSError) as exc:
+                self.window.notify(str(exc),True)
+                return
         self.store.set_setting('discord_onboarding',choice)
         self.store.set_setting('discord_enabled',choice['enabled'])
         self.enabled.setChecked(choice['enabled'])
@@ -204,11 +283,15 @@ class DiscordPanel(QWidget):
             self.refresh()
             return
         self.stop_bot()
-        from .discord_setup import PortalSetup
         self.setup_worker=PortalSetup(self.store,self)
         self.setup_worker.progress.connect(self.status.setText)
         self.setup_worker.outcome.connect(self.setup_done)
+        self.setup_worker.finished.connect(self.offer_missing_application_recovery)
         self.setup_worker.start()
+
+    def offer_missing_application_recovery(self):
+        if not getattr(self.window,'quitting',False) and self.store.setting('discord_setup',{}).get('missing_application'):
+            self.setup()
     def toggle_integration(self,enabled):
         self.enabled.setChecked(enabled)
         if not enabled:
@@ -227,7 +310,8 @@ class DiscordPanel(QWidget):
     def setup_done(self,ok,message):
         self.store.set_setting('discord_connection',message)
         self.window.notify(message,not ok)
-        if ok and self.store.setting('discord_enabled',True): self.connect_bot()
+        if ok and self.store.setting('discord_enabled',True):
+            self.connect_bot()
     def connect_bot(self):
         if not self.store.setting('discord_enabled',True):
             self.window.notify('Discord連携は使わない設定です。セットアップから変更できます。',True)
@@ -238,15 +322,59 @@ class DiscordPanel(QWidget):
         if self.bot and self.bot.is_alive():
             self.bot.stop()
             self.store.set_setting('discord_connection','接続を終了しています。')
-            QTimer.singleShot(1000,self.connect_bot)
+            self.show_connection_action('reconnecting')
             return
+        self.start_connection()
+
+    def start_connection(self):
         from .discord_bot import BotThread
+        from .schedule_activity import ensure_host
+        self.show_connection_action('connecting')
+        try:
+            ensure_host(self.store)
+        except (RuntimeError,ValueError) as exc:
+            self.window.notify(str(exc),True)
         self.store.set_setting('discord_connection','接続中…')
         self.bot=BotThread(self.store)
         self.bot.start()
+
+    def show_connection_action(self,action):
+        self.connection_action=action
+        self.connect_button.setText({'connecting':'接続中…','reconnecting':'再接続中…'}.get(action,'接続・再接続'))
+        self.disconnect_button.setText('切断中…' if action=='stopping' else 'Discord接続を停止')
+        self.connect_button.setEnabled(action is None)
+        self.disconnect_button.setEnabled(action!='stopping')
+        if action:
+            self.connection_poll.start()
+        else:
+            self.connection_poll.stop()
+
+    def request_disconnect(self):
+        self.show_connection_action('stopping')
+        self.store.set_setting('discord_connection','接続を終了しています。')
+        if self.bot:
+            self.bot.stop()
+
+    def update_connection_action(self):
+        action=self.connection_action
+        alive=bool(self.bot and self.bot.is_alive())
+        if action=='reconnecting' and not alive:
+            self.start_connection()
+        elif action=='stopping' and not alive:
+            self.stop_bot()
+            self.refresh()
+        elif action=='connecting':
+            status=self.store.setting('discord_connection','')
+            if not alive or status not in {'接続中','接続中…','切断・再接続待ち'}:
+                self.show_connection_action(None)
+                self.refresh()
+
     def stop_bot(self):
+        from .schedule_activity import stop_host
+        stop_host(self.store)
         if self.bot: self.bot.stop()
         self.store.set_setting('discord_connection','停止')
+        self.show_connection_action(None)
     def choose_guild(self):
         gid=self.guilds.currentData()
         if not gid:

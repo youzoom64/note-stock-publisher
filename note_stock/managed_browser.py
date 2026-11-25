@@ -1,6 +1,7 @@
 """Dedicated browser profiles; never attach to the user's everyday browser."""
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import time
@@ -9,6 +10,9 @@ import psutil
 
 
 CHOICES={'auto','chrome','edge','chromium'}
+
+class BrowserNotRunning(RuntimeError):
+    pass
 
 
 def installed_browser(kind):
@@ -56,7 +60,7 @@ def owned_process(record, profile, executable):
         return None
 
 
-def connect(playwright, root, preference='auto'):
+def connect(playwright, root, preference='auto', *, activate=True, allow_launch=True):
     root=Path(root)
     kind,executable=select_browser(playwright,preference)
     profile=root/'browser-profiles'/kind
@@ -67,14 +71,23 @@ def connect(playwright, root, preference='auto'):
     if process is not None and record.get('mode')=='interactive_login':
         raise RuntimeError('Googleログイン用の専用ブラウザーが開いています。ログイン後、そのウィンドウを閉じて接続確認を続けてください。')
     if process is None:
+        if not allow_launch:
+            raise BrowserNotRunning('専用ブラウザーは起動していません。')
         port_file=profile/'DevToolsActivePort'
         if port_file.exists():
             port_file.unlink()
+        startup={}
+        if not activate and os.name=='nt':
+            info=subprocess.STARTUPINFO()
+            info.dwFlags|=subprocess.STARTF_USESHOWWINDOW
+            info.wShowWindow=4  # SW_SHOWNOACTIVATE: visible, without taking focus.
+            startup['startupinfo']=info
         child=subprocess.Popen([executable,'--user-data-dir='+str(profile.resolve()),
             '--remote-debugging-port=0','--remote-debugging-address=127.0.0.1',
             '--no-first-run','--disable-crash-reporter','--disable-background-mode',
             '--disable-extensions','--disable-component-extensions-with-background-pages',
-            '--lang=ja','--start-maximized','about:blank'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+            '--lang=ja',*(['--start-maximized'] if activate else []),'about:blank'],
+            stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,**startup)
         process=psutil.Process(child.pid)
         record={'pid':process.pid,'created':process.create_time(),'executable':executable,'profile':str(profile)}
         record_file.write_text(json.dumps(record),encoding='utf-8')
@@ -92,6 +105,22 @@ def connect(playwright, root, preference='auto'):
     raise RuntimeError('専用ブラウザーへの接続がタイムアウトしました。')
 
 
+def startup_blank_page(context):
+    """Find an unused tab in the app-owned browser without replacing open work."""
+    return next((page for page in context.pages if not page.is_closed() and page.url=='about:blank'),None)
+
+
+def background_page(browser,context):
+    """Create a normal, visible tab without selecting it or raising its window."""
+    session=browser.new_browser_cdp_session()
+    try:
+        with context.expect_page() as created:
+            session.send('Target.createTarget',{'url':'about:blank','background':True})
+        return created.value
+    finally:
+        session.detach()
+
+
 def shutdown(root):
     root=Path(root)
     records=list(root.glob('browser-owner-*.json'))
@@ -106,7 +135,17 @@ def shutdown(root):
     return {'closed':all(item['closed'] for item in results),'browsers':results}
 
 
-def interactive_login(playwright,root,preference='auto'):
+def reset_note_login(playwright,root,preference='auto'):
+    """An explicit re-login resets only note cookies in this app's profile."""
+    if not shutdown(root)['closed']: raise RuntimeError('専用ブラウザーを終了できません。')
+    try:
+        _,context=connect(playwright,root,preference)
+        context.clear_cookies(domain=re.compile(r'(^|\.)note\.com$'))
+    finally:
+        if not shutdown(root)['closed']: raise RuntimeError('ログイン準備用ブラウザーを終了できません。')
+
+
+def interactive_login(playwright,root,preference='auto',app_mode=False):
     """Open the app's profile as a regular browser, with automation disconnected."""
     root=Path(root)
     closed=shutdown(root)
@@ -117,9 +156,10 @@ def interactive_login(playwright,root,preference='auto'):
         raise RuntimeError('GoogleログインにはGoogle ChromeまたはMicrosoft Edgeを選択してください。')
     profile=root/'browser-profiles'/kind
     profile.mkdir(parents=True,exist_ok=True)
+    target=['--app=https://note.com/login'] if app_mode else ['--new-window','https://note.com/login']
     child=subprocess.Popen([executable,'--user-data-dir='+str(profile.resolve()),
         '--no-first-run','--disable-background-mode','--lang=ja','--start-maximized',
-        '--new-window','https://note.com/login'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+        *target],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
     process=psutil.Process(child.pid)
     record={'pid':process.pid,'created':process.create_time(),'executable':executable,
             'profile':str(profile),'mode':'interactive_login'}

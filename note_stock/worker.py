@@ -1,3 +1,4 @@
+from contextlib import ExitStack
 import threading
 import time
 
@@ -6,6 +7,8 @@ from PySide6.QtCore import QThread, Signal
 from .diagnostics import Diagnostics
 from .publisher import LoginRequired
 from .native import NativeNoteBrowser as NoteBrowser
+
+HEADLESS_WRITES = frozenset({'save_note_draft', 'prepare_schedule', 'prepare_publish', 'publish'})
 
 
 class BrowserWorker(QThread):
@@ -19,30 +22,62 @@ class BrowserWorker(QThread):
         self.cancel = threading.Event()
         self.items=[]
         self.import_due=None
+        self.recovery_id=''
+        self.headless_sync=False
 
     def run(self):
+        if self.action=='prepare_schedule':
+            try:
+                self.store.require_schedulable(self.post['id'])
+            except ValueError as exc:
+                self.outcome.emit('failed',str(exc),'')
+                return
         adapter = NoteBrowser(self.store, self.progress.emit, self.cancel.is_set)
+        adapter.background=self.action not in {'login','relogin','edit'}
+        if self.action=='sync_articles' and self.headless_sync:
+            self.run_headless_sync(adapter)
+            return
         log = Diagnostics(self.store)
         try:
             from playwright.sync_api import sync_playwright
             error = log.record("browser_start", action=self.action, post_id=(self.post or {}).get("id", ""))
             if error:
                 self.progress.emit(error)
-            with sync_playwright() as playwright:
-                google_login=self.action=='login' and self.store.setting('note_login_method','password')=='google'
+            with sync_playwright() as playwright, ExitStack() as browser_scope:
+                google_login=self.action=='relogin' or (self.action=='login' and self.store.setting('note_login_method','password')=='google')
                 if google_login:
                     from .managed_browser import interactive_login,shutdown
-                    child=interactive_login(playwright,self.store.root,self.store.setting('browser','auto'))
+                    if self.action=='relogin':
+                        from .managed_browser import reset_note_login
+                        self.progress.emit('専用ブラウザーでnoteのログイン画面を準備しています。')
+                        reset_note_login(playwright,self.store.root,self.store.setting('browser','auto'))
+                        child=interactive_login(playwright,self.store.root,self.store.setting('browser','auto'),app_mode=True)
+                    else:
+                        child=interactive_login(playwright,self.store.root,self.store.setting('browser','auto'))
+                    if self.action=='relogin':
+                        import psutil
+                        process=psutil.Process(child.pid)
+                        self.store.set_setting('remote_relogin_window',{'recovery_id':self.recovery_id,'ready':True,
+                            'pid':process.pid,'created':process.create_time()})
                     self.progress.emit('開いた通常ブラウザーで「Googleでログイン」を選び、noteにログインしてください。完了したら、この専用ブラウザーのウィンドウを閉じてください。接続確認を自動で続けます。')
                     end=time.monotonic()+900
                     while child.poll() is None:
-                        if self.cancel.is_set() or time.monotonic()>end:
+                        ticket=self.store.setting('remote_relogin_ticket',{}) if self.action=='relogin' else None
+                        expired=ticket is not None and (ticket.get('id')!=self.recovery_id or ticket.get('expires',0)<=time.time())
+                        if self.cancel.is_set() or time.monotonic()>end or expired:
                             shutdown(self.store.root)
+                            if ticket is not None:
+                                from .relogin import RecoveryStopped
+                                raise RecoveryStopped('再ログインを中止しました。' if ticket.get('cancelled') else '再ログインの接続期限が切れました。もう一度開始できます。')
                             raise RuntimeError('Googleログインの待機を終了しました。設定から再開できます。')
                         time.sleep(0.25)
-                adapter.open(playwright)
+                if self.action in HEADLESS_WRITES:
+                    from .headless_sync import open_note_session
+                    browser_scope.enter_context(open_note_session(adapter, playwright))
+                else:
+                    adapter.open(playwright)
                 try:
-                    if self.action == "login":
+                    if self.action in {"login",'relogin'}:
                         if google_login:
                             from .publisher import account_id
                             actual=adapter.identity()
@@ -52,6 +87,8 @@ class BrowserWorker(QThread):
                             actual = adapter.login(self.expected)
                         self.store.set_setting("account", actual)
                         self.store.set_setting("account_verified", True)
+                        from .headless_sync import remember_session
+                        remember_session(self.store,adapter.context)
                         status, message, url = "connected", f"{actual} に接続しました。", ""
                     elif self.action=='drafts':
                         items=adapter.drafts()
@@ -59,6 +96,8 @@ class BrowserWorker(QThread):
                         status,message,url='listed',f'noteの下書き {len(items)}件を取得しました。',''
                     elif self.action=='sync_articles':
                         result=adapter.sync_articles()
+                        from .headless_sync import remember_session
+                        remember_session(self.store,adapter.context)
                         self.data.emit({'action':'sync_articles',**result})
                         complete=self.store.setting('catalog_sync',{}).get('complete',False)
                         status,message,url='synced','記事を同期しました。'+('全件取得済み。' if complete else '全件取得の確認は未完了です。取得済み分を表示します。'),''
@@ -90,7 +129,7 @@ class BrowserWorker(QThread):
                                 raise ValueError('noteの公開条件が変更されています。最新の公開条件を確認して再操作してください。')
                         if self.action=='prepare_tags':
                             adapter.update_tags(original['id'],self.items)
-                            adapter.page=adapter.context.new_page()
+                            adapter.page=adapter.new_page()
                             adapter.sync_articles()
                             if original['status']=='scheduled':
                                 self.store.set_schedule(original['id'],original['due'])
@@ -99,21 +138,20 @@ class BrowserWorker(QThread):
                                     c.execute("UPDATE posts SET status='queued' WHERE id=?",(original['id'],))
                         elif self.action=='prepare_schedule':
                             adapter.update_tags(original['id'],original['tags'])
-                            adapter.page=adapter.context.new_page()
+                            adapter.page=adapter.new_page()
                             adapter.sync_articles()
-                            if remote_before!='published' and self.store.catalog_state(original['id']).get('remote_status')=='published':
-                                raise ValueError('note側ですでに公開されています。二重の投稿・更新を停止しました。')
+                            self.store.require_schedulable(original['id'])
                             self.store.set_schedule(original['id'],self.import_due)
                         elif self.action=='prepare_publish':
                             adapter.update_tags(original['id'],original['tags'])
-                            adapter.page=adapter.context.new_page()
+                            adapter.page=adapter.new_page()
                             adapter.sync_articles()
                             if remote_before!='published' and self.store.catalog_state(original['id']).get('remote_status')=='published':
                                 raise ValueError('note側ですでに公開されています。二重の投稿・更新を停止しました。')
                             with self.store.connect() as c:
                                 c.execute("UPDATE posts SET status='draft' WHERE id=?",(original['id'],))
                             claimed=self.store.claim(__import__('time').time(),post_id=original['id'])
-                            adapter.page=adapter.context.new_page()
+                            adapter.page=adapter.new_page()
                             result=adapter.publish(claimed)
                             url=result['url'] if isinstance(result,dict) else result
                             self.store.finish(original['id'],result['status'] if isinstance(result,dict) else 'published',url=url)
@@ -149,7 +187,7 @@ class BrowserWorker(QThread):
                             prepared_ok=False
                             try:
                                 self.progress.emit('下書きを取り込み中: '+item['title'])
-                                adapter.page=adapter.context.new_page()
+                                adapter.page=adapter.new_page()
                                 post=self.store.begin_native_edit(item['id'])
                                 begun=True
                                 adapter.edit(post,automatic=True)
@@ -187,6 +225,9 @@ class BrowserWorker(QThread):
                     else:
                         adapter.context.close()
         except Exception as exc:
+            from .relogin import RecoveryStopped
+            if not isinstance(exc,RecoveryStopped):
+                log.error('browser_operation_error',exc,action=self.action)
             if isinstance(exc,LoginRequired):
                 self.store.set_setting('account_verified',False)
             url = ""
@@ -194,23 +235,45 @@ class BrowserWorker(QThread):
             # not its verbose call log. Our own validation exceptions are safe to show.
             message = (str(exc) if isinstance(exc, (ValueError, RuntimeError)) and not type(exc).__module__.startswith("playwright")
                        else "note画面の操作に失敗しました（" + type(exc).__name__ + "）。ログイン・接続状況を確認してください。")
-            status = "failed"
+            status = 'cancelled' if isinstance(exc,RecoveryStopped) else 'failed'
             if self.post:
                 try:
                     if self.action in {'edit','save_note_draft','prepare_schedule','prepare_publish','prepare_tags','prepare_article'} and self.store.get(self.post['id'])['status']=='editing':
                         self.store.native_edit_failed(self.post['id'],message)
+                    elif self.action=='prepare_schedule' and self.store.catalog_state(self.post['id']).get('remote_status')=='published':
+                        # A reservation rejection must never rewrite a public article as failed.
+                        pass
                     else:
                         current = self.store.get(self.post["id"])
                         status = "unknown" if current["submitted"] or self.action == "verify" else ("held" if isinstance(exc, LoginRequired) else "failed")
                         self.store.finish(self.post["id"], status, message)
-                except Exception:
+                except Exception as save_error:
+                    log.error('browser_result_save_error',save_error,action=self.action)
                     status = "unknown"
                     message += " 結果の保存にも失敗しました。次回起動時に公開結果を確認してください。"
             try:
                 self.store.set_setting("paused", True)
-            except Exception:
+            except Exception as save_error:
+                log.error('pause_state_save_error',save_error,action=self.action)
                 message += " 一時停止設定も保存できませんでした。アプリを終了してください。"
         warning = log.record("browser_finish", action=self.action, status=status)
         if warning:
             message += " " + warning
         self.outcome.emit(status, message, url)
+
+    def run_headless_sync(self,adapter):
+        from playwright.sync_api import sync_playwright
+        from .headless_sync import sync_catalog
+        try:
+            with sync_playwright() as playwright:
+                result=sync_catalog(adapter,playwright)
+            self.data.emit({'action':'sync_articles',**result})
+            complete=self.store.setting('catalog_sync',{}).get('complete',False)
+            message='記事を同期しました。'+('全件取得済み。' if complete else '取得できた記事だけを反映しました。')
+            self.outcome.emit('synced',message,'')
+        except LoginRequired as exc:
+            Diagnostics(self.store).error('catalog_sync_login_error',exc)
+            self.outcome.emit('failed',str(exc),'')
+        except Exception as exc:
+            Diagnostics(self.store).error('catalog_sync_error',exc)
+            self.outcome.emit('failed','バックグラウンド同期に失敗しました（'+type(exc).__name__+'）。','')

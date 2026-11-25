@@ -1,7 +1,14 @@
-param([switch]$NoLaunch)
+﻿param([switch]$NoLaunch)
 $ErrorActionPreference = 'Stop'
 $noteRoot = $PSScriptRoot
+$setupLock = $null
 try {
+    Write-Host 'Pythonを確認し、noteストック専用の環境に必要なライブラリを入れます。'
+    if (-not $NoLaunch) {
+        Write-Host '準備が終わると、noteストックが開き、Discord連携を使うか選べます。'
+        Write-Host '連携の設定を始めるとブラウザーでDiscordが開きます。必要に応じてログインや承認をしてください。'
+        Write-Host '「今は使わない」を選んでも、PC上でnoteストックを使えます。'
+    }
     if (-not [Environment]::Is64BitOperatingSystem) { throw 'Windows x64 is required.' }
     if ($noteRoot.Length -gt 70) {
         Add-Type -AssemblyName System.Windows.Forms
@@ -11,15 +18,26 @@ try {
         $destination = Join-Path $picker.SelectedPath 'NoteStockPublisher'
         if ($destination.Length -gt 70 -or (Test-Path -LiteralPath $destination)) { throw 'Choose a shorter folder without an existing NoteStockPublisher folder.' }
         New-Item -ItemType Directory -Path $destination | Out-Null
-        foreach ($name in @('main.py','requirements.txt','setup.cmd','setup.ps1','start.cmd','README.md','VALIDATION.md','THIRD_PARTY_NOTICES.md')) {
+        foreach ($name in @('main.py','requirements.txt','setup.ps1','start.cmd','README.md','VALIDATION.md','THIRD_PARTY_NOTICES.md')) {
             Copy-Item -LiteralPath (Join-Path $noteRoot $name) -Destination $destination
         }
         Copy-Item -LiteralPath (Join-Path $noteRoot 'note_stock') -Destination $destination -Recurse
+        $activityAssets = 'extensions\remote_relogin\plugin\web'
+        $activityDestination = Join-Path $destination $activityAssets
+        New-Item -ItemType Directory -Path $activityDestination -Force | Out-Null
+        foreach ($asset in @('index.html','style.css','app.js')) {
+            Copy-Item -LiteralPath (Join-Path (Join-Path $noteRoot $activityAssets) $asset) -Destination $activityDestination
+        }
         $noteRoot = $destination
     }
     Set-Location -LiteralPath $noteRoot
     $tempFolder = Join-Path $noteRoot 'data\temp'
     New-Item -ItemType Directory -Path $tempFolder -Force | Out-Null
+    try {
+        $setupLock = [IO.File]::Open((Join-Path $noteRoot 'data\runtime-setup.lock'), 'OpenOrCreate', 'Write', 'None')
+    } catch [IO.IOException] {
+        throw '別のウィンドウで初回準備が進行中です。そちらの完了をお待ちください。'
+    }
     $env:TEMP = $tempFolder
     $env:TMP = $tempFolder
     $env:PIP_CACHE_DIR = Join-Path $noteRoot 'data\pip-cache'
@@ -71,12 +89,15 @@ try {
         & $venvPython -m playwright install chromium
         if ($LASTEXITCODE -ne 0) { throw 'Browser installation failed.' }
     }
+    Set-Content -LiteralPath (Join-Path $noteRoot 'data\runtime-ready') -Value 'ready' -Encoding Ascii
     Write-Host 'Runtime setup completed. Choose whether to use Discord in the app.'
     if (-not $NoLaunch) {
-        Start-Process -FilePath (Join-Path $noteRoot '.venv\Scripts\pythonw.exe') -ArgumentList @(('"'+(Join-Path $noteRoot 'main.py')+'"'),'--setup-discord') -WorkingDirectory $noteRoot -WindowStyle Normal
+        Start-Process -FilePath (Join-Path $noteRoot '.venv\Scripts\pythonw.exe') -ArgumentList ('"'+(Join-Path $noteRoot 'main.py')+'"') -WorkingDirectory $noteRoot -WindowStyle Normal
     }
     exit 0
 } catch {
     Write-Host ('Setup failed: '+$_.Exception.Message) -ForegroundColor Red
     exit 1
+} finally {
+    if ($setupLock) { $setupLock.Dispose() }
 }

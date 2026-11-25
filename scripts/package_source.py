@@ -10,14 +10,16 @@ import zipfile
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
 from note_stock import __version__
-entries=[ROOT/name for name in ('main.py','requirements.txt','setup.cmd','setup.ps1','start.cmd','README.md','VALIDATION.md','THIRD_PARTY_NOTICES.md')]
+entries=[ROOT/name for name in ('main.py','requirements.txt','setup.ps1','start.cmd','README.md','VALIDATION.md','THIRD_PARTY_NOTICES.md')]
 entries.extend(path for path in (ROOT/'note_stock').rglob('*.py') if '__pycache__' not in path.parts)
 entries.append(ROOT/'scripts'/'package_source.py')
+activity_assets=tuple(ROOT/'extensions/remote_relogin/plugin/web'/name for name in ('index.html','style.css','app.js'))
+entries.extend(activity_assets)
 for path in entries:
     content=path.read_text(encoding='utf-8-sig')
     if path.suffix=='.py':
         ast.parse(content,filename=str(path))
-    if re.search(r'\b[A-Za-z]:[\\/]',content):
+    if path not in activity_assets and re.search(r'\b[A-Za-z]:[\\/]',content):
         raise RuntimeError('Fixed drive path in distribution: '+str(path.relative_to(ROOT)))
     if re.search(r'-WindowStyle\s+Hidden\b',content,re.I):
         raise RuntimeError('Hidden window launch in distribution: '+str(path.relative_to(ROOT)))

@@ -137,6 +137,7 @@ def test_partial_settings_save_keeps_independent_success(store, monkeypatch):
 
 
 def test_diagnostics_opt_in(store):
+    store.set_setting('diagnostics', False)
     log = Diagnostics(store)
     log.record('off')
     assert not (store.root/'logs').exists()
@@ -148,6 +149,30 @@ def test_diagnostics_opt_in(store):
     store.set_setting('diagnostics', False)
     log.record('off_again')
     assert file.read_bytes() == data
+
+
+def test_diagnostic_session_preserves_logs_until_next_start(store):
+    from note_stock.diagnostics import DiagnosticSession
+
+    first = DiagnosticSession(store)
+    first.configure(True)
+    error = RuntimeError('test credential must not appear')
+    first.log.error('operation_failed',error,stage='startup')
+    first.configure(False)
+    path = store.root/'logs'/'diagnostics.jsonl'
+    data = path.read_text(encoding='utf-8')
+    assert 'operation_failed' in data and 'RuntimeError' in data
+    assert 'test credential' not in data
+    first.log.error('disabled_error',error)
+    assert path.read_text(encoding='utf-8')==data
+    second = DiagnosticSession(store)
+    second.configure(True)
+    try:
+        assert path.read_text(encoding='utf-8')==''
+        second.log.record('another_start')
+        assert 'another_start' in path.read_text(encoding='utf-8')
+    finally:
+        second.configure(False)
 
 
 @pytest.mark.parametrize('status', ['scheduled','queued','review'])

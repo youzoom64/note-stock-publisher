@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
@@ -7,8 +8,22 @@ from note_stock.store import Store
 from note_stock.worker import BrowserWorker
 
 
+@pytest.fixture
+def headless_adapter(monkeypatch):
+    calls = []
+
+    @contextmanager
+    def open_session(adapter, playwright):
+        calls.append(adapter)
+        adapter.background = False
+        yield
+
+    monkeypatch.setattr('note_stock.headless_sync.open_note_session', open_session)
+    return calls
+
+
 @pytest.mark.parametrize('submitted,login_error,expected', [(False,False,'failed'),(True,False,'unknown'),(False,True,'held')])
-def test_worker_persists_failure_boundary_and_pauses(tmp_path, monkeypatch, submitted, login_error, expected):
+def test_worker_persists_failure_boundary_and_pauses(tmp_path, monkeypatch, headless_adapter, submitted, login_error, expected):
     store = Store(tmp_path)
     store.set_setting('paused', False)
     pid = store.create({'editor_kind':'legacy'})
@@ -18,7 +33,7 @@ def test_worker_persists_failure_boundary_and_pauses(tmp_path, monkeypatch, subm
         def __init__(self, *args):
             self.context = SimpleNamespace(close=lambda: None)
         def open(self, playwright):
-            pass
+            pytest.fail('Publishing must not open the visible browser')
         def publish(self, post):
             if submitted:
                 store.checkpoint(pid, key='n123456789abc', submitted=True)
@@ -29,6 +44,7 @@ def test_worker_persists_failure_boundary_and_pauses(tmp_path, monkeypatch, subm
     worker.outcome.connect(lambda status, message, url: outputs.append(status))
     worker.run()
     assert outputs == [expected]
+    assert len(headless_adapter) == 1
     assert store.get(pid)['status'] == expected
     assert store.setting('paused') is True
 
@@ -44,7 +60,7 @@ def test_two_instances_cannot_lock_same_store(tmp_path):
 
 
 @pytest.mark.parametrize('scenario', ['changed-magazine','changed-price','external-publish','keeps-tags','rotated-token'])
-def test_remote_publish_rechecks_conditions_and_preserves_requested_tags(tmp_path,monkeypatch,scenario):
+def test_remote_publish_rechecks_conditions_and_preserves_requested_tags(tmp_path,monkeypatch,headless_adapter,scenario):
     import copy
     import json
     from note_stock.native import NativeNoteBrowser
@@ -62,7 +78,10 @@ def test_remote_publish_rechecks_conditions_and_preserves_requested_tags(tmp_pat
         def __init__(self,*args):
             self.store=store
             self.context=SimpleNamespace(close=lambda:None,new_page=lambda:None)
-        def open(self,pw): pass
+        def open(self,pw): pytest.fail('Publishing must not open the visible browser')
+        def new_page(self):
+            assert not self.background
+            return self.context.new_page()
         def edit(self,post,automatic=False):
             updated=copy.deepcopy(template)
             if scenario=='changed-magazine': updated['payload']['magazine_ids']=[2]
@@ -83,6 +102,7 @@ def test_remote_publish_rechecks_conditions_and_preserves_requested_tags(tmp_pat
     outputs=[]
     worker.outcome.connect(lambda status,message,url:outputs.append(status))
     worker.run()
+    assert len(headless_adapter) == 1
     if scenario in {'keeps-tags','rotated-token'}:
         assert outputs==['published'] and len(sent)==1
         assert sent[0]['tags']==['希望タグ']

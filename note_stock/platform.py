@@ -24,9 +24,9 @@ def set_autostart(enabled):
     with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_SET_VALUE) as key:
         if enabled:
             if getattr(sys, "frozen", False):
-                command = f'"{sys.executable}" --tray'
+                command = f'"{sys.executable}"'
             else:
-                command = f'"{sys.executable}" "{app_folder() / "main.py"}" --tray'
+                command = f'"{sys.executable}" "{app_folder() / "main.py"}"'
             winreg.SetValueEx(key, "NoteStockPublisher", 0, winreg.REG_SZ, command)
         else:
             try:

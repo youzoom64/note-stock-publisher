@@ -8,7 +8,7 @@ from .publisher import account_id
 from .store import now_ts, tags_from_text
 
 COMMANDS = ('status','list','get','create','update','duplicate','delete','move','settings','pause','resume','login','edit','drafts','import','publish','verify','export',
-            'sync_articles','save_note_draft','schedule','cancel_schedule','delete_note','publish_note','tags','job','discord')
+            'sync_articles','save_note_draft','refresh_article','schedule','cancel_schedule','delete_note','publish_note','tags','job','discord')
 
 
 class Commands:

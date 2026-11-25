@@ -5,7 +5,7 @@ from pathlib import Path
 
 def test_runtime_has_no_fixed_drive_paths_article_ids_or_developer_hooks():
     root=Path(__file__).resolve().parents[1]
-    files=[root/'main.py',root/'setup.cmd',root/'setup.ps1',root/'start.cmd',*list((root/'note_stock').rglob('*.py'))]
+    files=[root/'main.py',root/'setup.ps1',root/'start.cmd',*list((root/'note_stock').rglob('*.py'))]
     for path in files:
         text=path.read_text(encoding='utf-8-sig')
         assert not re.search(r'\b[A-Za-z]:[\\/]',text),str(path)

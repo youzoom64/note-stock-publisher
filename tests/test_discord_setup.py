@@ -22,15 +22,36 @@ def test_owner_authentication_pending_is_reported_without_collecting_password(tm
     worker.page=Page()
     with pytest.raises(RuntimeError,match='中断'):
         worker.until(lambda:False,'接続を準備しています。')
-    assert store.setting('discord_setup')['stage']=='owner_authentication'
+    assert store.setting('discord_setup')['authentication_pending'] is True
     assert any('一致しません' in notice for notice in notices)
+
+
+def test_deleted_installed_bot_can_be_replaced_without_losing_server(tmp_path):
+    from note_stock.discord_setup import replace_missing_application
+    import pytest
+
+    store=Store(tmp_path)
+    app='123456789012345678'
+    store.set_setting('discord_setup',{'application':app,'stage':'installed','created_guild':'123'})
+    store.set_setting('discord',{'application':app,'guild':'123','category':'456','channel':'789','menu':'012'})
+    store.set_setting('discord_token','protected-test-token')
+    store.set_setting('remote_relogin',{'https_url':'https://example.com','schedule_verified':True})
+    with pytest.raises(ValueError):
+        replace_missing_application(store,app)
+    assert store.setting('discord_token')=='protected-test-token'
+    PortalSetup(store).checkpoint(missing_application=app)
+    replace_missing_application(store,app)
+    assert store.setting('discord_setup')=={'stage':'named','created_guild':'123','name':'note管理'}
+    assert store.setting('discord')=={'guild':'123','category':'456','channel':'789','replaced_application':app}
+    assert not store.setting('discord_token')
+    assert not store.setting('remote_relogin')['schedule_verified']
 
 
 def test_portal_container_form_creation_token_encryption_and_resume(tmp_path,monkeypatch):
     store=Store(tmp_path)
     store.set_setting('discord_onboarding',{'enabled':True,'destination':'existing','developer_terms_accepted':True})
     fake_token='X'*24+'.'+'Y'*6+'.'+'Z'*30
-    state={'created':0,'reset':0}
+    state={'created':0,'reset':0,'auth_completed':False}
     application='123456789012345678'
     def route(route):
         url=route.request.url
@@ -53,13 +74,16 @@ def test_portal_container_form_creation_token_encryption_and_resume(tmp_path,mon
                 <div id="none" role="option" hidden onclick="this.hidden=true;document.querySelector('#save').hidden=false">なし</div>
                 <button id="save" hidden onclick="this.hidden=true">変更を保存</button>'''
         elif url.endswith('/bot'):
+            if state['auth_completed']:
+                route.fulfill(content_type='text/html',body=f'<div>Token: {fake_token}<button>Copy</button></div>')
+                return
             html='''<span id="privacy-label">公開アプリは誰でもインストールできます。</span>
                 <input type="checkbox" role="switch" aria-labelledby="privacy-label" checked onchange="document.querySelector('#save').hidden=false">
                 <button id="save" hidden onclick="this.hidden=true">変更を保存</button>
                 <button onclick="document.querySelector('#confirmation').hidden=false">トークンをリセット</button>
                 <div id="confirmation" hidden><h1>Botのトークンをリセットしますか？</h1>
-                <button onclick="fetch('/reset',{method:'POST'});document.querySelector('#token').value='''+"'"+fake_token+"'"+'''">実行します！</button></div>
-                <input id="token" readonly>'''
+                <button onclick="fetch('/reset',{method:'POST'});document.querySelector('#confirmation').hidden=true;document.querySelector('#auth').hidden=false">実行します！</button></div>
+                <h1 id="auth" hidden>多要素認証</h1>'''
         elif '/oauth2/authorize?' in url:
             html='''<script>fetch('/api/v10/oauth2/authorize',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({guild_id:'234567890123456789'})})</script>'''
         elif '/api/v10/oauth2/authorize' in url:
@@ -69,28 +93,42 @@ def test_portal_container_form_creation_token_encryption_and_resume(tmp_path,mon
             html='<h1>Portal</h1>'
         route.fulfill(content_type='text/html;charset=utf-8',body=html)
     with sync_playwright() as pw:
-        browser=pw.chromium.launch(headless=True)
+        browser=pw.chromium.launch(channel='chrome',headless=False)
         context=browser.new_context()
+        startup_tab=context.new_page()
         context.route('**/*',route)
         monkeypatch.setattr('note_stock.managed_browser.connect',lambda *args:(browser,context))
         from contextlib import nullcontext
         monkeypatch.setattr('playwright.sync_api.sync_playwright',lambda:nullcontext(pw))
         outputs=[]
         worker=PortalSetup(store)
-        worker.outcome.connect(lambda ok,message:outputs.append(ok))
+        def replace_after_auth(message):
+            if '本人確認を求めています' not in message or state['auth_completed']:
+                return
+            old_page=worker.page
+            assert old_page is startup_tab and context.pages==[startup_tab]
+            bot_url=old_page.url
+            state['auth_completed']=True
+            old_page.close()
+            replacement=context.new_page()
+            replacement.goto(bot_url)
+
+        worker.progress.connect(replace_after_auth)
+        worker.outcome.connect(lambda ok,message:outputs.append((ok,message)))
         worker.run()
-        assert outputs==[True]
+        assert [ok for ok,_ in outputs]==[True], outputs
         assert store.setting('discord_setup')['application']==application
         encrypted=store.setting('discord_token')
         assert fake_token not in encrypted and unprotect(encrypted)==fake_token
         assert store.setting('discord_setup')['stage']=='installed'
         assert store.setting('discord')['guild']=='234567890123456789'
-        assert state=={'created':1,'reset':1}
+        assert state=={'created':1,'reset':1,'auth_completed':True}
         again=PortalSetup(store)
-        again.outcome.connect(lambda ok,message:outputs.append(ok))
+        again.outcome.connect(lambda ok,message:outputs.append((ok,message)))
+        state['auth_completed']=False
         again.run()
-        assert outputs==[True,True]
-        assert state=={'created':1,'reset':1}
+        assert [ok for ok,_ in outputs]==[True,True], outputs
+        assert state=={'created':1,'reset':1,'auth_completed':False}
         browser.close()
 
 

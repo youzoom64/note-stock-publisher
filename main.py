@@ -9,7 +9,7 @@ from note_stock.platform import app_folder, prepare_environment
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-dir", type=Path)
-    parser.add_argument("--tray", action="store_true")
+    parser.add_argument("--tray", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument('--setup-discord',action='store_true',help='Discord Bot作成ウィザードを開く')
     parser.add_argument("--smoke-test", action="store_true", help="起動のみを検証して終了（投稿しない）")
     parser.add_argument("--browser-smoke", action="store_true", help="専用ブラウザーのオフライン起動を検証")
@@ -67,41 +67,81 @@ def main():
         return 0 if result['result']=='passed' else 1
     from PySide6.QtCore import QLockFile, QTimer
     from PySide6.QtWidgets import QApplication, QMessageBox
-    app = QApplication(sys.argv[:1])
-    app.setApplicationName("NoteStockPublisher")
-    app.setQuitOnLastWindowClosed(False)
+    app = None
+    diagnostics = None
+    session = None
+    application_lock = lock = None
+    stage = 'startup_lock'
     try:
         if preparation_error:
             raise preparation_error
         prepare_environment(data)
+        from note_stock.ipc import CommandServer, request_running
+        from types import SimpleNamespace
+        application_root = app_folder().resolve()
+        application_lock = QLockFile(str(application_root / 'application.lock'))
+        if not application_lock.tryLock(0):
+            app = QApplication(sys.argv[:1])
+            existing = request_running(application_root, {'command': 'activate'})
+            if existing and existing.get('ok'):
+                return 0
+            raise RuntimeError('noteストックはすでに起動しています。起動処理の完了をお待ちください。')
         lock = QLockFile(str(data / "instance.lock"))
         if not lock.tryLock(0):
             raise RuntimeError("このデータフォルダーを使うnoteストックは、すでに起動しています。")
+        stage = 'open_store'
         from note_stock.store import Store
+        from note_stock.diagnostics import DEFAULT_ENABLED, DiagnosticSession
+        store = Store(data)
+        session = DiagnosticSession(store)
+        diagnostics = session.log
+        log_warning = ''
+        try:
+            session.configure(store.setting('diagnostics', DEFAULT_ENABLED))
+        except OSError:
+            log_warning = '診断ログを開始できません。ログの保存先を確認してください。'
+        diagnostics.record('application_start', pid=os.getpid())
+        stage = 'create_gui'
+        app = QApplication(sys.argv[:1])
+        app.setApplicationName("NoteStockPublisher")
+        app.setQuitOnLastWindowClosed(False)
         from note_stock.ui import MainWindow, STYLE
         app.setStyleSheet(STYLE)
-        store = Store(data)
         window = MainWindow(store,offline=args.smoke_test)
+        def activate(request):
+            if request.get('command') != 'activate':
+                raise ValueError('未対応の操作です。')
+            window.show_normal()
+            return {'ok': True}
+        activation_server = CommandServer(SimpleNamespace(root=application_root), activate, window)
         if not args.smoke_test and (args.setup_discord or (
                 store.setting('discord_onboarding',None) is None and not store.setting('discord_token',''))):
-            window.tabs.setCurrentIndex(2)
+            window.tabs.setCurrentWidget(window.discord_panel)
             QTimer.singleShot(500,window.discord_panel.setup)
-        from note_stock.diagnostics import Diagnostics
-        warning = Diagnostics(store).record('application_start')
-        if warning:
-            window.notify(warning, True)
+        if log_warning:
+            window.notify(log_warning, True)
         if args.smoke_test:
             window.timer.stop()
             (data / 'gui-smoke.txt').write_text('GUI startup passed', encoding='utf-8')
             QTimer.singleShot(1200, app.quit)
-        if not args.tray or not window.tray.isVisible():
-            window.show()
+        window.show()
+        stage = 'event_loop'
         result = app.exec()
-        lock.unlock()
+        diagnostics.record('application_exit', code=result)
         return result
     except Exception as exc:
+        if diagnostics:
+            diagnostics.error('application_error',exc,stage=stage)
+        if app is None:
+            app = QApplication(sys.argv[:1])
         QMessageBox.critical(None, "noteストックを起動できません", str(exc) + "\n書き込み可能なフォルダーへ展開して起動してください。")
         return 1
+    finally:
+        if session:
+            session.configure(False)
+        for held_lock in (lock,application_lock):
+            if held_lock is not None and held_lock.isLocked():
+                held_lock.unlock()
 
 
 if __name__ == "__main__":

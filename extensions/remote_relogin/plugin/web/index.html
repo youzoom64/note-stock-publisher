@@ -1,0 +1,10 @@
+<!doctype html><html lang="ja"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>note管理</title><link rel="stylesheet" href="/style.css"></head><body>
+<header><div class="eyebrow">noteストック</div><h1>note管理</h1><p id="status" role="status">接続を準備しています…</p></header>
+<main hidden><form id="pair"><label for="code">Discordで受け取った接続コード</label><input id="code" autocomplete="off" autocapitalize="none" spellcheck="false" required maxlength="64"><button id="connect" type="submit">専用ブラウザーに接続</button><p class="muted">コードは一度だけ使えます。noteのパスワードは、接続後の画面で入力してください。</p></form>
+<section id="controls" hidden><div class="toolbar"><button id="zoom">拡大</button><button id="zoom-out" disabled>縮小</button><button id="zoom-reset">全体表示</button><output id="zoom-level" aria-label="表示倍率">100%</output><button data-scroll="600">上へ</button><button data-scroll="-600">下へ</button></div>
+<p class="muted">タップでPCをクリック。一本指で拡大した画面を移動。二本指で拡大・縮小できます。</p>
+<div id="viewport"><img id="screen" alt="PCのnote専用ブラウザー。タップして操作できます。" draggable="false"></div>
+<form id="type"><label for="text">選択中の入力欄へ送る文字</label><div class="input-row"><input id="text" type="password" maxlength="2000" autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false"><button type="submit">入力</button></div><label class="check"><input id="reveal" type="checkbox">入力文字を表示</label></form>
+<div class="keys"><button data-key="TAB">次の欄</button><button data-key="BACKSPACE">1文字削除</button><button data-key="ENTER">Enter</button><button data-key="ESCAPE">戻す</button></div>
+<button id="finish" class="primary">ログイン完了を確認</button><button id="end" class="secondary">遠隔操作を終了</button>
+<p class="muted">本人認証は、ご自身で画面を操作してください。復旧しても自動投稿は勝手に再開しません。</p></section></main><script type="module" src="/app.js"></script></body></html>

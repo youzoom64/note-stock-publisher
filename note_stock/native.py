@@ -39,10 +39,21 @@ def content_snapshot(page):
 
 class NativeNoteBrowser(NoteBrowser):
     def open(self, playwright):
-        from .managed_browser import connect
-        self.browser,self.context=connect(playwright,self.store.root,self.store.setting('browser','auto'))
+        from .managed_browser import connect,startup_blank_page
+        background=getattr(self,'background',False)
+        self.browser,self.context=connect(playwright,self.store.root,self.store.setting('browser','auto'),activate=not background)
         self.context.set_default_timeout(20000)
-        self.page=self.context.new_page()
+        # Reuse the browser's startup tab instead of leaving an empty tab beside
+        # the editor. Never navigate a tab that already contains a document.
+        self.page=startup_blank_page(self.context)
+        if self.page is None:
+            self.page=self.new_page()
+
+    def new_page(self):
+        if getattr(self,'background',False):
+            from .managed_browser import background_page
+            return background_page(self.browser,self.context)
+        return self.context.new_page()
 
     def disconnect(self):
         # The with sync_playwright() owner disconnects its driver. The app-owned
@@ -95,7 +106,7 @@ class NativeNoteBrowser(NoteBrowser):
             save.click()
         if not receipt.value.ok:
             raise VerificationFailed('noteの下書き保存応答が失敗しました。')
-        inspector=self.context.new_page()
+        inspector=self.new_page()
         try:
             inspector.goto(self.EDITOR+f'/notes/{key}/edit/',wait_until='domcontentloaded')
             inspector.locator('.ProseMirror').first.wait_for(state='visible')
@@ -108,7 +119,7 @@ class NativeNoteBrowser(NoteBrowser):
                 self.page.close()
         self.store.merge_catalog([{'key':key,'title':saved['title'],'status':'published' if post['url'] else 'draft',
                                    'owner':self.store.setting('account',''),'updated':''}],False)
-        self.page=self.context.new_page()
+        self.page=self.new_page()
         prepared=self.store.begin_native_edit(post['id'])
         self.edit(prepared,automatic=True)
         # Desired tags are applied to the captured, full native payload.
@@ -288,7 +299,7 @@ class NativeNoteBrowser(NoteBrowser):
                 self.page.wait_for_timeout(200)
             # Final native payload already contains the complete free/pay HTML and
             # every chosen publication option. Never turn either body into plain text.
-            inspector=self.context.new_page()
+            inspector=self.new_page()
             try:
                 inspector.goto(self.EDITOR+f'/notes/{key}/edit/',wait_until='domcontentloaded')
                 inspector.locator('.ProseMirror').first.wait_for(state='visible')
@@ -310,7 +321,7 @@ class NativeNoteBrowser(NoteBrowser):
         if baseline:
             self.sync_articles()
             latest=self.store.catalog_state(post['id'])
-            self.page=self.context.new_page()
+            self.page=self.new_page()
             if latest.get('remote_status')=='published' and baseline.get('remote_status')!='published':
                 raise VerificationFailed('この記事はnote側ですでに公開されています。重複投稿を停止しました。')
             if baseline.get('remote_updated') and latest.get('remote_updated')!=baseline['remote_updated']:
@@ -368,7 +379,7 @@ class NativeNoteBrowser(NoteBrowser):
                 self.page.close()
 
     def verify_saved_content(self,post):
-        inspector=self.context.new_page()
+        inspector=self.new_page()
         try:
             inspector.goto(self.EDITOR+f'/notes/{post["draft_key"]}/edit/',wait_until='domcontentloaded')
             inspector.locator('.ProseMirror').first.wait_for(state='visible',timeout=20000)

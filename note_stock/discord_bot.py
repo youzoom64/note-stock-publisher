@@ -1,7 +1,8 @@
 """Discord Gateway client. Only bot tokens; no user-token API or public listener."""
 import asyncio
 import concurrent.futures
-from datetime import datetime
+import calendar
+from datetime import date, datetime
 import json
 import logging
 import threading
@@ -13,19 +14,22 @@ from discord import app_commands
 from discord.ext import tasks
 from .remote import submit
 from .secrets import unprotect
-from .store import JST, STATUSES, now_ts
+from .store import JST, STATUSES, article_timestamp, now_ts
 from .discord_commands import command_names,command_help
+from .discord_flow import flow,ManagedModal,processing_frame
+from .diagnostics import Diagnostics
 
-EXPIRED_SCREEN='操作メニュー（終了）'
 ACTION_NAMES={'sync_articles':'note同期','save_note_draft':'下書き保存','refresh_article':'本文・公開条件の読み込み',
     'schedule':'予約・日時変更','cancel_schedule':'予約取消','publish_note':'投稿・更新','delete_note':'記事削除',
-    'tags':'タグ変更','pause':'自動投稿の停止','resume':'自動投稿の再開'}
+    'tags':'タグ変更','pause':'自動投稿の停止','resume':'自動投稿の再開','relogin_note':'noteへの再ログイン',
+    'relogin_disconnect':'再ログイン画面の切断'}
 RECORD_FOOTER='note操作記録'
 MENU_TEXT='## 操作メニュー\n次の操作を選んでください。'
 
 
 def is_execution_record(content='',embeds=()):
-    if content.startswith(('完了:','要確認:','受付しました。')): return True
+    content=content or ''
+    if content.startswith(('完了:','要確認:')): return True
     for embed in embeds:
         data=embed.to_dict() if hasattr(embed,'to_dict') else embed
         if data.get('footer',{}).get('text')==RECORD_FOOTER: return True
@@ -47,7 +51,7 @@ def operation_embed(store,nid,body):
     if nid.startswith('job:'):
         try: job=store.job(nid[4:])
         except ValueError: pass
-    action=ACTION_NAMES.get(job['action'],'記事操作') if job else '操作結果'
+    action=ACTION_NAMES.get(job['action'],'記事操作') if job else ACTION_NAMES.get(body.get('action'),'操作結果')
     embed=discord.Embed(title=('完了: ' if body['ok'] else '要確認: ')+action,
         description=(body['message']+('\n'+body['url'] if body.get('url') else ''))[:4000],
         timestamp=datetime.fromtimestamp(job['updated'] if job else now_ts(),JST))
@@ -68,61 +72,17 @@ def authorized(store,user,guild,channel):
                 str(user)==str(config['owner']) and str(guild)==str(config['guild']) and str(channel)==str(config['channel']))
 
 
-def new_ui_session(store):
-    session=uuid.uuid4().hex
-    store.set_setting('discord_active_ui',session)
-    return session
-
-
 def session_for(view,interaction):
     return getattr(interaction,'extras',{}).get('note_ui_session',view.session)
 
 
 async def show_view(i,method,*args,**kwargs):
-    view=kwargs.get('view')
-    source=getattr(i,'message',None)
-    editing=method=='edit_message'
-    if view is not None and source is not None and method=='send_message':
-        method='edit_message'; editing=True
-        kwargs.pop('ephemeral',None)
-    if method=='edit_message' and args:
-        kwargs['content']=args[0]; args=args[1:]
-    if view is not None and source is not None:
-        old_content=getattr(source,'content','')
-        if old_content.startswith(('完了:','要確認:')) and not any(
-                getattr(getattr(embed,'footer',None),'text','')==RECORD_FOOTER for embed in getattr(source,'embeds',[])):
-            legacy=discord.Embed(title='以前の操作記録',description=old_content[:4000])
-            legacy.set_footer(text=RECORD_FOOTER)
-            kwargs.setdefault('embeds',[legacy,*getattr(source,'embeds',[])][:10])
-    if view is not None and source is not None and method=='followup':
-        kwargs.pop('ephemeral',None); kwargs.pop('wait',None)
-        if args: kwargs['content']=args[0]
-        result=await i.edit_original_response(**kwargs)
-        editing=True
-    elif method=='followup':
-        if view is not None: kwargs['wait']=True
-        result=await i.followup.send(*args,**kwargs)
-    else:
-        result=await getattr(i.response,method)(*args,**kwargs)
-    if view is not None:
-        message=result if isinstance(result,discord.Message) else None
-        if message is None and hasattr(i,'original_response'):
-            try: message=await i.original_response()
-            except discord.HTTPException: pass
-        view.message=message
-        view.message_id=getattr(source,'id',None) if editing else getattr(message,'id',None)
-        await view.client.retire_views(view)
-    return result
+    view=kwargs.pop('view',None)
+    if view is None:
+        raise RuntimeError('Screen responses require a managed view')
+    content=args[0] if args else kwargs.pop('content','')
+    return await flow(view.client).render(i,method,content,view,**kwargs)
 
-
-async def modal_allowed(client,interaction,session):
-    if not authorized(client.store,interaction.user.id,interaction.guild_id,interaction.channel_id):
-        await interaction.response.send_message('操作権限がありません。',ephemeral=True)
-        return False
-    if client.store.setting('discord_active_ui','')!=session:
-        await interaction.response.send_message('最新の操作メニューからやり直してください。',ephemeral=True)
-        return False
-    return True
 
 
 def article_text(store,post):
@@ -131,7 +91,10 @@ def article_text(store,post):
     due=datetime.fromtimestamp(post['due'],JST).strftime('%Y-%m-%d %H:%M') if post.get('due') else 'なし'
     ready=bool(post.get('native_ready')) and post.get('status')!='review'
     price=str(summary['price'])+'円' if ready and 'price' in summary else '未確認'
-    preparation='' if ready else '\n本文・公開条件は未確認です。先に「本文・公開条件を読み込む」を押してください。'
+    preparation=''
+    if not ready:
+        preparation=('\n本文・公開条件は未確認です。予約を開くと自動で確認します。' if post['draft_key']
+                     else '\nnoteの下書きに保存すると予約できるようになります。')
     return (f"{post['title'] or '無題'}\nnote: {remote} / 管理: {STATUSES.get(post['status'],post['status'])}"
             f"\n予約: {due}（日本時間） / 価格: {price}"
             f"\nタグ: {' '.join('#'+t for t in post['tags'])}{preparation}\n\n{post['body'][:900]}")[:1800]
@@ -149,50 +112,50 @@ async def display_article(i,client,pid,listing=('all',0,''),notice='',method='ed
                     **({'ephemeral':True} if method=='send_message' else {}))
 
 
-class GuardView(discord.ui.View):
-    def __init__(self,client,timeout=600,root=False):
-        super().__init__(timeout=timeout)
+class ScreenLifecycle:
+    def __init_subclass__(cls,**kwargs):
+        super().__init_subclass__(**kwargs)
+        if 'interaction_check' in cls.__dict__:
+            raise TypeError('Screen admission belongs to GuardView')
+    def initialize_screen(self,client,root=False):
         self.client=client
         self.root=root
-        self.session=None if root else new_ui_session(client.store)
+        self.session=uuid.uuid4().hex
         self.message=None
         self.message_id=None
         if not hasattr(client,'operation_views'): client.operation_views=set()
-        if not root: client.operation_views.add(self)
+
+    async def on_error(self,interaction,error,item):
+        await self.client.finish_action(interaction,'操作を完了できませんでした（'+type(error).__name__+'）。',
+                                        deferred=interaction.response.is_done())
 
     async def on_timeout(self):
         if self.root: return
-        active=self.client.store.setting('discord_active_ui','')==self.session
-        if active:
-            new_ui_session(self.client.store)
+        active=flow(self.client).expire(self)
         self.client.operation_views.discard(self)
-        for item in self.children: item.disabled=True
-        if self.message is not None:
+        for item in self.walk_children():
+            if hasattr(item,'disabled'):item.disabled=True
+        current_id=flow(self.client).state().get('message_id')
+        if self.message is not None and (active or str(self.message.id)!=str(current_id)):
             try: await remove_old_controls(self.message)
             except discord.HTTPException:
                 self.client.store.set_setting('discord_connection','期限切れ画面の表示を更新できませんでした。実行は拒否しています。')
         if active: await self.client.send_menu()
 
     async def interaction_check(self,interaction):
-        if not authorized(self.client.store,interaction.user.id,interaction.guild_id,interaction.channel_id):
-            await interaction.response.send_message('この操作は登録した本人専用です。',ephemeral=True)
-            return False
-        if self.root:
-            menu=self.client.store.setting('discord',{}).get('menu')
-            if menu and str(getattr(getattr(interaction,'message',None),'id',''))==str(menu):
-                interaction.extras['note_ui_session']=new_ui_session(self.client.store)
-                return True
-        elif self.client.store.setting('discord_active_ui','')==self.session:
-            return True
-        for item in self.children: item.disabled=True
-        source=getattr(interaction,'message',None)
-        if source is not None and is_execution_record(getattr(source,'content',''),getattr(source,'embeds',[])):
-            await interaction.response.edit_message(view=None)
-        else:
-            await interaction.response.defer()
-            await interaction.delete_original_response()
-        if not self.root: self.stop()
-        return False
+        return await flow(self.client).admit(interaction,view=self)
+
+
+class GuardView(ScreenLifecycle,discord.ui.View):
+    def __init__(self,client,timeout=600,root=False):
+        super().__init__(timeout=timeout)
+        self.initialize_screen(client,root)
+
+
+class GuardLayoutView(ScreenLifecycle,discord.ui.LayoutView):
+    def __init__(self,client,timeout=600):
+        super().__init__(timeout=timeout)
+        self.initialize_screen(client)
 
 
 class InfoView(GuardView):
@@ -229,105 +192,53 @@ class OperationHistory(GuardView):
         await show_view(i,'edit_message',content='note管理',view=Menu(self.client))
 
 
-class ActionResult(GuardView):
-    def __init__(self,client,listing=('all',0,'')):
-        super().__init__(client)
-        self.listing=listing
-    @discord.ui.button(label='記事一覧へ戻る')
-    async def back(self,i,b):
-        view=Articles(self.client,*self.listing)
-        await show_view(i,'edit_message',content=f'記事 {view.total}件 / {view.page+1}ページ目',view=view)
-        self.stop()
-    @discord.ui.button(label='管理メニューへ戻る')
-    async def home(self,i,b):
-        await show_view(i,'edit_message',content='note管理',view=Menu(self.client))
-        self.stop()
-
-
 class Confirm(GuardView):
-    def __init__(self,client,post,action,listing=('all',0,'')):
+    def __init__(self,client,post,action,listing=('all',0,''),*,due=None):
         super().__init__(client,180)
         self.pid,self.action,self.updated=post['id'],action,post['updated']
         self.listing=listing
+        self.due=due
 
     @discord.ui.button(label='確認して実行',style=discord.ButtonStyle.danger)
     async def yes(self,i,button):
-        await self.client.accept(i,self.action,self.pid,{'confirmed_updated':self.updated},ui_session=self.session,listing=self.listing)
+        data={'confirmed_updated':self.updated}
+        if self.due is not None:
+            data['due']=self.due
+        await self.client.accept(i,self.action,self.pid,data,ui_session=self.session,listing=self.listing)
         self.stop()
 
     @discord.ui.button(label='やめる')
     async def no(self,i,button):
-        await display_article(i,self.client,self.pid,self.listing)
+        await self.client.finish_action(i,'操作を取り消しました。',ok=True)
         self.stop()
 
 
-class ScheduleModal(discord.ui.Modal,title='投稿・更新日時（日本時間）'):
-    when=discord.ui.TextInput(label='日時 例: 2026-12-01 09:00',max_length=16)
-    def __init__(self,client,pid,listing=('all',0,'')):
-        super().__init__()
-        self.client,self.pid=client,pid
-        self.session=client.store.setting('discord_active_ui','')
-        self.listing=listing
-    async def on_submit(self,i):
-        if not await modal_allowed(self.client,i,self.session): return
-        try:
-            try:
-                due=datetime.strptime(str(self.when).strip(),'%Y-%m-%d %H:%M').replace(tzinfo=JST).timestamp()
-            except ValueError:
-                raise ValueError('日時は「2030-01-01 09:00」の形式で入力してください（日本時間）。') from None
-            if due<=now_ts():
-                raise ValueError('未来の日時を指定してください。')
-            await show_view(i,'send_message',article_text(self.client.store,self.client.store.get(self.pid))+
-                '\n指定日時: '+str(self.when)+'\nこの日時で予約しますか？',
-                view=ScheduleConfirm(self.client,self.pid,due,self.listing),ephemeral=True,allowed_mentions=discord.AllowedMentions.none())
-        except ValueError as exc:
-            await display_article(i,self.client,self.pid,self.listing,notice=str(exc),method='send_message')
-
-
-class ScheduleConfirm(GuardView):
-    def __init__(self,client,pid,due,listing=('all',0,'')):
-        super().__init__(client,180)
-        self.pid,self.due=pid,due
-        self.updated=client.store.get(pid)['updated']
-        self.listing=listing
-    @discord.ui.button(label='この日時で予約',style=discord.ButtonStyle.primary)
-    async def confirm(self,i,b):
-        await self.client.accept(i,'schedule',self.pid,{'due':self.due,'confirmed_updated':self.updated},ui_session=self.session,listing=self.listing)
-        self.stop()
-    @discord.ui.button(label='やめて記事へ戻る')
-    async def no(self,i,b):
-        await display_article(i,self.client,self.pid,self.listing)
-        self.stop()
-
-
-class TagsModal(discord.ui.Modal,title='ハッシュタグ'):
+class TagsModal(ManagedModal,title='ハッシュタグ'):
     tags=discord.ui.TextInput(label='タグを空白またはカンマで区切る',required=False,max_length=1000)
     def __init__(self,client,pid,listing=('all',0,'')):
-        super().__init__()
+        super().__init__(client)
         self.client,self.pid=client,pid
         self.tags.default=' '.join(client.store.get(pid)['tags'])
         self.session=client.store.setting('discord_active_ui','')
         self.listing=listing
-    async def on_submit(self,i):
-        if not await modal_allowed(self.client,i,self.session): return
+    async def handle_submit(self,i):
         await self.client.accept(i,'tags',self.pid,{'tags':str(self.tags)},ui_session=self.session,listing=self.listing)
 
 
-class NewModal(discord.ui.Modal,title='noteへ下書き保存'):
+class NewModal(ManagedModal,title='noteへ下書き保存'):
     name=discord.ui.TextInput(label='記事タイトル',max_length=200)
     body=discord.ui.TextInput(label='本文（長文は /note_new のテキスト添付）',style=discord.TextStyle.paragraph,max_length=4000)
     tags=discord.ui.TextInput(label='ハッシュタグ',required=False,max_length=1000)
     def __init__(self,client):
-        super().__init__()
+        super().__init__(client)
         self.client=client
         self.session=client.store.setting('discord_active_ui','')
-    async def on_submit(self,i):
-        if not await modal_allowed(self.client,i,self.session): return
-        await i.response.defer(ephemeral=True,thinking=getattr(i,'message',None) is None)
+    async def handle_submit(self,i):
+        await flow(self.client).defer(i,thinking=getattr(i,'message',None) is None)
         from .store import tags_from_text
         try:
             if self.client.store.setting('discord_active_ui','')!=self.session:
-                raise ValueError('最新の操作メニューからやり直してください。')
+                return await flow(self.client).obsolete(i)
             if not str(self.name).strip() or not str(self.body).strip():
                 raise ValueError('タイトルと本文を入力してください。')
             pid=self.client.store.incoming_draft(i.id,{'title':str(self.name),'body':str(self.body),'tags':tags_from_text(str(self.tags))})
@@ -335,9 +246,121 @@ class NewModal(discord.ui.Modal,title='noteへ下書き保存'):
         except Exception as exc:
             message=str(exc) if isinstance(exc,(ValueError,RuntimeError)) else '受付できませんでした（'+type(exc).__name__+'）。'
             if self.client.store.setting('discord_active_ui','')==self.session:
-                await show_view(i,'followup',message,ephemeral=True,view=InfoView(self.client))
+                await self.client.finish_action(i,message,deferred=True)
             else:
-                await show_view(i,'followup',message,ephemeral=True)
+                await flow(self.client).obsolete(i)
+
+
+class ReservationTime(ManagedModal,title='予約する時刻（日本時間）'):
+    clock=discord.ui.TextInput(label='時刻（24時間表記。例 09:30）',min_length=5,max_length=5)
+
+    def __init__(self,view,day):
+        super().__init__(view.client)
+        self.view,self.day=view,day
+        if view.post.get('due'):
+            self.clock.default=datetime.fromtimestamp(view.post['due'],JST).strftime('%H:%M')
+
+    async def handle_submit(self,i):
+        view=self.view
+        try:
+            hour,minute=map(int,str(self.clock).split(':'))
+            due=datetime(view.year,view.month,self.day,hour,minute,tzinfo=JST)
+        except ValueError:
+            return await show_view(i,'send_message','時刻を 09:30 の形式で入力してください。\n'+view.text,
+                                   view=ReservationCalendar(view.client,view.post,view.listing,view.year,view.month),ephemeral=True)
+        if due.timestamp()<=now_ts():
+            return await show_view(i,'send_message','未来の日時を選んでください。\n'+view.text,
+                                   view=ReservationCalendar(view.client,view.post,view.listing,view.year,view.month),ephemeral=True)
+        await show_view(i,'send_message',article_text(view.client.store,view.post)+
+                        f'\n**{due:%Y/%m/%d %H:%M}（日本時間）** に予約しますか？',
+                        view=Confirm(view.client,view.post,'schedule',view.listing,due=due.timestamp()),ephemeral=True)
+
+
+class ReservationCalendar(GuardView):
+    def __init__(self,client,post,listing,year,month):
+        super().__init__(client)
+        self.post,self.listing,self.year,self.month=post,listing,year,month
+        from .calendar_image import reservation_counts
+        counts,_=reservation_counts(client.store.posts(),year,month)
+        today=datetime.now(JST).date()
+        weeks=calendar.Calendar(firstweekday=6).monthdayscalendar(year,month)
+        grid=['Su Mo Tu We Th Fr Sa']
+        grid.extend(' '.join(f'{day:2}' if day else '  ' for day in week) for week in weeks)
+        booked='、'.join(f'{day}日 {count}件' for day,count in sorted(counts.items()))
+        self.text=(f'**{year}年{month}月の予約カレンダー（日本時間）**\n```\n'+'\n'.join(grid)+
+                   '\n```\n'+(f'予約済み　{booked}\n' if booked else '')+'日付を選んでください。')
+        self.previous.disabled=(year,month)<=(today.year,today.month)
+        self.following.disabled=(year,month)==(9999,12)
+        last=calendar.monthrange(year,month)[1]
+        for row,start,end in ((0,1,15),(1,16,last)):
+            options=[discord.SelectOption(label=f'{day}日'+(f'（予約 {counts[day]}件）' if counts.get(day) else ''),value=str(day))
+                     for day in range(start,end+1) if date(year,month,day)>=today]
+            if options:
+                select=discord.ui.Select(placeholder=f'{start}〜{end}日から選ぶ',options=options,row=row)
+                async def choose(i,select=select):
+                    await flow(client).form(i,ReservationTime(self,int(select.values[0])))
+                select.callback=choose
+                self.add_item(select)
+
+    async def turn_month(self,i,step):
+        year,month=divmod(self.year*12+self.month-1+step,12)
+        view=ReservationCalendar(self.client,self.post,self.listing,year,month+1)
+        await show_view(i,'edit_message',view.text,view=view)
+
+    @discord.ui.button(label='前月',row=2)
+    async def previous(self,i,b):
+        await self.turn_month(i,-1)
+
+    @discord.ui.button(label='翌月',row=2)
+    async def following(self,i,b):
+        await self.turn_month(i,1)
+
+    @discord.ui.button(label='記事へ戻る',row=2)
+    async def back(self,i,b):
+        await display_article(i,self.client,self.post['id'],self.listing)
+
+
+async def open_reservation(i,client,post,listing=('all',0,'')):
+    store=client.store
+    ui=flow(client)
+    pid=post['id']
+    try:
+        store.require_schedulable(pid)
+        if not post['draft_key']:
+            raise ValueError('先にnoteへ下書きを保存してください。')
+        if not post['native_ready'] or post['status']=='review':
+            expected=ui.capture(i)
+            await ui.defer(i,thinking=getattr(i,'message',None) is None)
+            jid=submit(store,'refresh_article',pid,key=f'reservation-preflight:{i.id}',ui_session=expected)
+            ui.rebase(i)
+            await ui.progress(i,'noteから本文と公開条件を確認しています。完了すると予約カレンダーが開きます。')
+            deadline=asyncio.get_running_loop().time()+120
+            while ui.valid(i):
+                job=store.job(jid)
+                if job['state']=='done':
+                    post=store.get(pid)
+                    if not post['native_ready'] or post['status']=='review':
+                        raise ValueError('公開条件を確認できませんでした。note側の状態を確認してください。')
+                    store.require_schedulable(pid)
+                    break
+                if job['state']=='failed':
+                    raise ValueError(job['result'].get('message') or '本文と公開条件を確認できませんでした。')
+                if asyncio.get_running_loop().time()>=deadline:
+                    raise ValueError('記事の確認に時間がかかっています。PC側の処理が終わったら、もう一度「予約・日時変更」を押してください。')
+                await asyncio.sleep(0.5)
+            if not ui.valid(i):
+                return
+        elif store.setting('remote_relogin',{}).get('schedule_verified'):
+            return await ui.activity(i,pid)
+    except (ValueError,RuntimeError) as exc:
+        if not ui.valid(i):
+            return await ui.obsolete(i)
+        method='deferred' if ui.responded(i) else 'send_message'
+        return await display_article(i,client,pid,listing,notice=str(exc),method=method)
+    initial=datetime.fromtimestamp(max(post.get('due') or 0,now_ts()),JST)
+    view=ReservationCalendar(client,post,listing,initial.year,initial.month)
+    method='deferred' if ui.responded(i) else 'send_message'
+    await show_view(i,method,view.text,view=view,ephemeral=True)
 
 
 class ArticleView(GuardView):
@@ -347,7 +370,11 @@ class ArticleView(GuardView):
         self.listing=listing
         ready=bool(post.get('native_ready')) and post.get('status')!='review'
         self.publish.disabled=not ready
-        self.schedule.disabled=not ready
+        self.schedule.disabled=not post['draft_key']
+        try:
+            client.store.require_schedulable(self.pid)
+        except ValueError:
+            self.schedule.disabled=True
         self.tags.disabled=not ready
         self.refresh_article.label='内容・公開条件を読み直す' if ready else '本文・公開条件を読み込む'
         if post['draft_key']:
@@ -361,15 +388,18 @@ class ArticleView(GuardView):
         self.stop()
     @discord.ui.button(label='予約・日時変更',style=discord.ButtonStyle.primary,row=1)
     async def schedule(self,i,b):
-        if not await self.prepared(i): return
-        await i.response.send_modal(ScheduleModal(self.client,self.pid,self.listing))
+        try:
+            post=self.client.store.get(self.pid)
+        except ValueError:
+            return await display_article(i,self.client,self.pid,self.listing)
+        await open_reservation(i,self.client,post,self.listing)
     @discord.ui.button(label='内容・公開条件を読み直す',row=1)
     async def refresh_article(self,i,b):
         await self.client.accept(i,'refresh_article',self.pid,ui_session=self.session,listing=self.listing)
     @discord.ui.button(label='タグ設定',row=2)
     async def tags(self,i,b):
         if not await self.prepared(i): return
-        await i.response.send_modal(TagsModal(self.client,self.pid,self.listing))
+        await flow(self.client).form(i,TagsModal(self.client,self.pid,self.listing))
     @discord.ui.button(label='予約取消',row=2)
     async def cancel(self,i,b):
         await self.client.accept(i,'cancel_schedule',self.pid,ui_session=self.session,listing=self.listing)
@@ -400,62 +430,157 @@ class ArticleView(GuardView):
                                       view=Confirm(self.client,post,'delete_note',self.listing),ephemeral=True,allowed_mentions=discord.AllowedMentions.none())
 
 
-class ArticleSelect(discord.ui.Select):
-    def __init__(self,client,posts,listing=('all',0,'')):
-        self.client=client
+class ArticleSearchModal(ManagedModal,title='記事を検索'):
+    query=discord.ui.TextInput(label='タイトル・本文のキーワード（空欄で解除）',required=False,max_length=100)
+    def __init__(self,listing):
+        super().__init__(listing.client);self.listing=listing;self.session=listing.session
+        self.query.default=listing.query
+    async def handle_submit(self,i):
+        view=Articles(self.client,self.listing.kind,0,str(self.query).strip(),self.listing.size)
+        await show_view(i,'send_message',view.list_text,view=view,ephemeral=True)
+
+
+class ArticleRows(GuardLayoutView):
+    # Each article uses an action row and a button. Keep the pair and heading
+    # inside Discord's per-message component limit, even on a 30-article page.
+    ARTICLES_PER_MESSAGE=15
+    BUTTON_STYLE={
+        'draft':discord.ButtonStyle.primary,
+        'editing':discord.ButtonStyle.primary,
+        'published':discord.ButtonStyle.success,
+    }
+
+    def __init__(self,listing,entries,first):
+        super().__init__(listing.client)
         self.listing=listing
-        super().__init__(placeholder='記事を選択',options=[discord.SelectOption(label=(p['title'] or '無題')[:100],
-            value=p['id'],description=STATUSES.get(p['status'],p['status'])[:100]) for p in posts])
-    async def callback(self,i):
-        await display_article(i,self.client,self.values[0],self.listing)
-        if self.view: self.view.stop()
+        self.text=f'{first}～{first+len(entries)-1}件目'
+        self.add_item(discord.ui.TextDisplay(self.text))
+        for post,_ in entries:
+            label=STATUSES.get(post['status'],post['status'])+'｜'+(post['title'] or '無題')
+            # Button labels are plain text; they do not interpret Markdown.
+            title=' '.join(label.split());units=0;chars=[]
+            for char in title:
+                cost=len(char.encode('utf-16-le'))//2
+                if units+cost>77:chars.append('…');break
+                chars.append(char);units+=cost
+            button=discord.ui.Button(label=''.join(chars),custom_id='article:'+uuid.uuid4().hex,
+                                     style=self.BUTTON_STYLE.get(post['status'],discord.ButtonStyle.secondary))
+            async def open_article(i,pid=post['id']):
+                await display_article(i,self.client,pid,self.listing.context)
+            button.callback=open_article
+            self.add_item(discord.ui.ActionRow(button))
+
+
+class ArticleListFooter(GuardView):
+    def __init__(self,listing):
+        super().__init__(listing.client);self.listing=listing;self.text='記事一覧の操作'
+        self.prev.disabled=listing.page==0;self.next.disabled=listing.page+1>=listing.pages
+    @discord.ui.button(label='前へ')
+    async def prev(self,i,b):await self.listing.show(i,self.listing.page-1)
+    @discord.ui.button(label='次へ')
+    async def next(self,i,b):await self.listing.show(i,self.listing.page+1)
+    @discord.ui.button(label='管理メニューへ戻る')
+    async def back(self,i,b):await self.listing.back.callback(i)
 
 
 class Articles(GuardView):
-    def __init__(self,client,kind='all',page=0,query=''):
+    PAGE_SIZE=30
+    SIZES=(10,30)
+    def __init__(self,client,kind='all',page=0,query='',size=None):
         super().__init__(client)
-        self.kind,self.page,self.query=kind,page,query
-        posts=[p for p in client.store.posts() if (kind=='all' or (kind=='scheduled' and p['status'] in {'scheduled','queued','native_reserved'})
-               or (kind=='draft' and client.store.catalog_state(p['id']).get('remote_status')=='draft')
-               or (kind=='published' and client.store.catalog_state(p['id']).get('remote_status')=='published'))
-               and query.casefold() in (p['title']+' '+p['body']).casefold()]
-        self.total=len(posts)
-        self.page=max(0,min(page,max(0,(self.total-1)//20)))
-        selected=posts[self.page*20:self.page*20+20]
-        if selected:
-            self.add_item(ArticleSelect(client,selected,(kind,page,query)))
-        self.prev.disabled=self.page==0
-        self.next.disabled=(self.page+1)*20>=len(posts)
-    @discord.ui.button(label='前へ')
-    async def prev(self,i,b):
-        await self.show(i,self.page-1)
-    @discord.ui.button(label='次へ')
-    async def next(self,i,b):
-        await self.show(i,self.page+1)
-    @discord.ui.select(placeholder='表示する状態',options=[discord.SelectOption(label=l,value=v) for l,v in
-        [('すべて','all'),('下書き','draft'),('予約','scheduled'),('公開済み','published')]])
-    async def filter(self,i,select):
-        view=Articles(self.client,select.values[0],0,self.query)
-        await show_view(i,'edit_message',content=f'記事 {view.total}件 / 1ページ目',view=view)
-    async def show(self,i,page):
-        view=Articles(self.client,self.kind,page,self.query)
-        await show_view(i,'edit_message',content=f'記事 {view.total}件 / {view.page+1}ページ目',view=view)
-    @discord.ui.button(label='管理メニューへ戻る',row=4)
+        size=size if size is not None else client.store.setting('discord_article_page_size',self.PAGE_SIZE)
+        self.size=size if size in self.SIZES else self.PAGE_SIZE
+        self.kind,self.query=kind,query
+        entries=[]
+        with client.store.connect() as connection:
+            catalog_by_id={row['post_id']:dict(row) for row in connection.execute(
+                'SELECT * FROM catalog WHERE account=?',(client.store.setting('account',''),))}
+            published_at={row['post_id']:row['stamp'] for row in connection.execute(
+                "SELECT post_id,MAX(updated) AS stamp FROM jobs WHERE action='publish_note' AND state='done' GROUP BY post_id")}
+        for post in client.store.posts():
+            catalog=catalog_by_id.get(post['id'],{});remote=catalog.get('remote_status','')
+            if kind=='scheduled' and post['status'] not in {'scheduled','queued','native_reserved'}: continue
+            if kind=='draft' and (remote or post['status'])!='draft': continue
+            if kind=='published' and (remote or post['status'])!='published': continue
+            if query.casefold() not in (post['title']+' '+post['body']).casefold(): continue
+            stamp=article_timestamp(post,catalog)
+            if post['status']=='published':stamp=max(stamp,published_at.get(post['id'],0))
+            entries.append((post,stamp))
+        entries.sort(key=lambda row:(row[1],row[0]['created'],row[0]['id']),reverse=True)
+        self.total=len(entries);self.pages=max(1,(self.total+self.size-1)//self.size)
+        self.page=max(0,min(page,self.pages-1));self.context=(kind,self.page,query,self.size)
+        chosen=entries[self.page*self.size:(self.page+1)*self.size]
+        self.selected=[post for post,_ in chosen]
+        first=self.page*self.size+1;last=first+len(chosen)-1
+        label={'all':'すべて','draft':'下書き','published':'公開済み','scheduled':'予約'}.get(kind,kind)
+        self.list_text=f'## 記事一覧\n{self.total}件 · {label} · 新しい順 · {self.size}件表示\n'
+        self.list_text+=(f'{first}～{last}件目 / {self.page+1}／{self.pages}ページ' if chosen else '該当する記事はありません。')
+        if query: self.list_text+='\n検索: '+discord.utils.escape_markdown(query)
+        if chosen:self.list_text+='\n記事タイトルを押すと詳細が開きます。'
+        self.embeds=[]
+        chunk=ArticleRows.ARTICLES_PER_MESSAGE
+        self.parts=[ArticleRows(self,chosen[offset:offset+chunk],first+offset)
+                    for offset in range(0,len(chosen),chunk)]
+        if self.parts:self.parts.append(ArticleListFooter(self))
+        self.prev.disabled=self.page==0;self.next.disabled=self.page+1>=self.pages
+        self.clear_search.disabled=not query
+        for button,number in [(self.size10,10),(self.size30,30)]:
+            button.style=discord.ButtonStyle.primary if self.size==number else discord.ButtonStyle.secondary
+        for button,value in [(self.all, 'all'),(self.drafts,'draft'),(self.published,'published'),(self.scheduled,'scheduled')]:
+            button.style=discord.ButtonStyle.primary if kind==value else discord.ButtonStyle.secondary
+    async def show(self,i,page,notice=''):
+        view=Articles(self.client,self.kind,page,self.query,self.size)
+        if notice:view.list_text=notice+'\n\n'+view.list_text
+        await show_view(i,'send_message',view.list_text,view=view,ephemeral=True)
+    async def choose_filter(self,i,kind):
+        view=Articles(self.client,kind,0,self.query,self.size)
+        await show_view(i,'edit_message',view.list_text,view=view)
+    async def resize(self,i,size):
+        self.client.store.set_setting('discord_article_page_size',size)
+        view=Articles(self.client,self.kind,(self.page*self.size)//size,self.query,size)
+        await show_view(i,'edit_message',view.list_text,view=view)
+    @discord.ui.button(label='記事検索',row=0)
+    async def search(self,i,b): await flow(self.client).form(i,ArticleSearchModal(self))
+    @discord.ui.button(label='検索を解除',row=0)
+    async def clear_search(self,i,b):
+        view=Articles(self.client,self.kind,0,'',self.size)
+        await show_view(i,'edit_message',view.list_text,view=view)
+    @discord.ui.button(label='10件',row=1)
+    async def size10(self,i,b):await self.resize(i,10)
+    @discord.ui.button(label='30件',row=1)
+    async def size30(self,i,b):await self.resize(i,30)
+    @discord.ui.button(label='すべて',row=2)
+    async def all(self,i,b): await self.choose_filter(i,'all')
+    @discord.ui.button(label='下書き',row=2)
+    async def drafts(self,i,b): await self.choose_filter(i,'draft')
+    @discord.ui.button(label='公開済み',row=2)
+    async def published(self,i,b): await self.choose_filter(i,'published')
+    @discord.ui.button(label='予約',row=2)
+    async def scheduled(self,i,b): await self.choose_filter(i,'scheduled')
+    @discord.ui.button(label='前へ',row=3)
+    async def prev(self,i,b): await self.show(i,self.page-1)
+    @discord.ui.button(label='次へ',row=3)
+    async def next(self,i,b): await self.show(i,self.page+1)
+    @discord.ui.button(label='管理メニューへ戻る',row=3)
     async def back(self,i,b):
-        await show_view(i,'edit_message',content='note管理',view=Menu(self.client))
-        self.stop()
+        await show_view(i,'edit_message',content='note管理',view=Menu(self.client));self.stop()
 
 
 class Menu(GuardView):
     def __init__(self,client,root=False):
         super().__init__(client,None if root else 600,root=root)
+        from .relogin import available
+        if available(client.store):
+            recover=discord.ui.Button(label='noteへ再ログイン',custom_id='note:relogin',row=2,style=discord.ButtonStyle.primary)
+            recover.callback=client.begin_relogin
+            self.add_item(recover)
     @discord.ui.button(label='記事一覧',custom_id='note:articles')
     async def articles(self,i,b):
         view=Articles(self.client)
         await show_view(i,'send_message',f'記事 {view.total}件',view=view,ephemeral=True)
     @discord.ui.button(label='新規下書き',custom_id='note:new',style=discord.ButtonStyle.primary)
     async def new(self,i,b):
-        await i.response.send_modal(NewModal(self.client))
+        await flow(self.client).form(i,NewModal(self.client))
     @discord.ui.button(label='予約一覧',custom_id='note:schedules')
     async def schedules(self,i,b):
         view=Articles(self.client,'scheduled')
@@ -483,12 +608,41 @@ class Menu(GuardView):
         await show_view(i,'send_message',view.text,view=view,ephemeral=True)
 
 
+class RecoveryView(GuardView):
+    def __init__(self,client): super().__init__(client,600)
+    @discord.ui.button(label='Discord内の操作画面を開く',style=discord.ButtonStyle.primary)
+    async def launch(self,i,b):
+        try:
+            launched=await i.response.launch_activity()
+            instance=getattr(launched,'activity_id',None) or getattr(getattr(launched,'resource',None),'id',None)
+            if not instance: raise ValueError('Activityの起動結果を確認できませんでした。')
+            from .relogin import manager
+            await asyncio.to_thread(manager(self.client.store).activity_opened,instance)
+        except discord.HTTPException:
+            await self.client.finish_action(i,'Activityを開けませんでした。接続設定を確認してください。',deferred=i.response.is_done())
+    @discord.ui.button(label='管理メニューへ戻る')
+    async def back(self,i,b):
+        await show_view(i,'edit_message',content='note管理',view=Menu(self.client))
+    @discord.ui.button(label='再ログインを中止',style=discord.ButtonStyle.danger)
+    async def cancel_recovery(self,i,b):
+        await flow(self.client).progress(i,'再ログインの待機を中止しています…')
+        from .relogin import manager
+        stopped=await asyncio.to_thread(manager(self.client.store).cancel)
+        if not stopped:
+            await self.client.render_recovery_screen(i,MENU_TEXT,Menu(self.client))
+
+
 class NoteClient(discord.Client):
     def __init__(self,store):
         super().__init__(intents=discord.Intents(guilds=True,guild_messages=True),allowed_mentions=discord.AllowedMentions.none())
         self.store=store
+        self.recovery_ui_lock=asyncio.Lock()
         self.tree=app_commands.CommandTree(self)
         names=command_names(store.setting('discord_commands',{}))
+        @self.tree.command(name=names['relogin'],description='Discord内の専用画面でnoteへ再ログイン')
+        async def relogin(i:discord.Interaction):
+            if not await self.guard(i): return
+            await self.begin_relogin(i)
         @self.tree.command(name=names['menu'],description='noteの管理メニュー・記事検索')
         async def note(i:discord.Interaction,search:str=''):
             if not await self.guard(i): return
@@ -500,8 +654,8 @@ class NoteClient(discord.Client):
         @self.tree.command(name=names['new'],description='画像・長文を添えてnoteに下書き保存')
         async def new(i:discord.Interaction,title:str,body:str='',image:discord.Attachment=None,text:discord.Attachment=None):
             if not await self.guard(i): return
-            request_session=new_ui_session(store)
-            await i.response.defer(ephemeral=True,thinking=True)
+            request_session=flow(self).capture(i)
+            await flow(self).defer(i,thinking=True)
             try:
                 if text:
                     if text.size>2_000_000 or Path(text.filename).suffix.lower()!='.txt':
@@ -519,15 +673,15 @@ class NoteClient(discord.Client):
                     await image.save(target)
                     relative=str(target.relative_to(store.root))
                 if store.setting('discord_active_ui','')!=request_session:
-                    raise ValueError('最新の操作メニューからやり直してください。')
+                    return await flow(self).obsolete(i)
                 pid=store.incoming_draft(i.id,{'title':title,'body':body,'image':relative})
                 await self.accept(i,'save_note_draft',pid,already_deferred=True,ui_session=request_session)
             except Exception as exc:
                 message=str(exc) if isinstance(exc,ValueError) else '添付の読み込みに失敗しました。'
                 if store.setting('discord_active_ui','')==request_session:
-                    await show_view(i,'followup',message,ephemeral=True,view=InfoView(self))
+                    await self.finish_action(i,message,deferred=True)
                 else:
-                    await show_view(i,'followup',message,ephemeral=True)
+                    await flow(self).obsolete(i)
 
         @self.tree.command(name=names['list'],description='記事一覧・記事検索')
         async def listing(i:discord.Interaction,search:str=''):
@@ -556,10 +710,36 @@ class NoteClient(discord.Client):
         for action in ('read','schedule','cancel','publish','delete','tags'):
             self.add_article_command(names[action],action)
 
+    async def begin_relogin(self,i):
+        if not await self.guard(i): return
+        source=getattr(i,'message',None)
+        private=bool(getattr(getattr(source,'flags',None),'ephemeral',False))
+        flow(self).capture(i)
+        await flow(self).defer(i,thinking=not private)
+        async with self.recovery_ui_lock:
+            try:
+                from .relogin import manager
+                code=await asyncio.to_thread(manager(self.store).issue,str(i.id))
+                await self.render_recovery_screen(i,'再ログイン用の接続コード（10分間・一度限り）\n`'+code+'`\n'
+                    'コードをコピーし、「Discord内の操作画面を開く」から入力してください。\n'
+                    '入力せず戻った場合も、再ログインを押せばこの接続待機へ戻れます。\n'
+                    '専用ブラウザーのnoteからログアウトし、ログイン画面を開いています。\n'
+                    'noteのパスワードはチャットに書かず、操作画面で入力します。',RecoveryView(self))
+            except Exception as exc:
+                message=str(exc) if isinstance(exc,ValueError) else '再ログインを開始できませんでした。PCで拡張機能の状態を確認してください。'
+                await self.render_recovery_screen(i,message+'\n\n'+MENU_TEXT,Menu(self))
+
+    async def render_recovery_screen(self,i,content,view):
+        return await flow(self).render(i,'deferred',content,view,allowed_mentions=discord.AllowedMentions.none())
+
+    async def finish_action(self,i,message,ok=False,deferred=False):
+        if deferred: i.extras['note_deferred']=True
+        return await flow(self).finish(i,message,ok)
+
     def add_simple_command(self,name,action):
         async def run(i:discord.Interaction):
             if not await self.guard(i): return
-            await self.accept(i,action,ui_session=new_ui_session(self.store))
+            await self.accept(i,action,ui_session=flow(self).capture(i))
         descriptions={'sync_articles':'noteの記事一覧を同期','pause':'自動投稿を停止','resume':'自動投稿を再開'}
         self.tree.add_command(app_commands.Command(name=name,description=descriptions[action],callback=run))
 
@@ -584,24 +764,23 @@ class NoteClient(discord.Client):
         except ValueError:
             await show_view(i,'send_message','記事を候補から選び直してください。',ephemeral=True,view=Articles(self))
             return
-        if action in {'schedule','publish','tags'} and (not post['native_ready'] or post['status']=='review'):
+        if action in {'publish','tags'} and (not post['native_ready'] or post['status']=='review'):
             await show_view(i,'send_message',article_text(self.store,post),view=ArticleView(self,post),ephemeral=True)
         elif action=='schedule':
-            await i.response.send_modal(ScheduleModal(self,pid))
+            await open_reservation(i,self,post)
         elif action=='tags':
-            await i.response.send_modal(TagsModal(self,pid))
+            await flow(self).form(i,TagsModal(self,pid))
         elif action in {'publish','delete'}:
             prompt='今すぐ投稿・更新しますか？' if action=='publish' else 'note上の記事を削除します。よろしいですか？'
             await show_view(i,'send_message',article_text(self.store,post)+'\n'+prompt,
                 view=Confirm(self,post,'publish_note' if action=='publish' else 'delete_note'),ephemeral=True)
         else:
-            await self.accept(i,'refresh_article' if action=='read' else 'cancel_schedule',pid,ui_session=new_ui_session(self.store))
+            await self.accept(i,'refresh_article' if action=='read' else 'cancel_schedule',pid,ui_session=flow(self).capture(i))
 
     async def on_message(self,message):
         if message.author.bot or not authorized(self.store,message.author.id,
                 getattr(message.guild,'id',None),message.channel.id): return
         # Message bodies are not inspected; no privileged Message Content intent.
-        new_ui_session(self.store)
         await self.send_menu()
 
     async def send_menu(self):
@@ -612,13 +791,19 @@ class NoteClient(discord.Client):
         return sent.id
 
     async def activate_menu(self,message_id):
+        async with flow(self).lock:
+            await self.install_menu(message_id)
+
+    async def install_menu(self,message_id):
         config=self.store.setting('discord',{})
-        if int(message_id)>int(config.get('menu') or 0):
+        latest=max(int(config.get('menu') or 0),int(flow(self).state().get('message_id') or 0))
+        if int(message_id)>latest:
             old=config.get('menu')
             config['menu']=str(message_id)
             self.store.set_setting('discord',config)
-            new_ui_session(self.store)
-            await self.retire_views(None,keep_root=True)
+            view=Menu(self,root=True)
+            flow(self).install(view,message_id=message_id)
+            await self.retire_views(view,keep_root=True)
             if old: await self.disable_menu(old)
 
     async def disable_menu(self,message_id):
@@ -637,85 +822,127 @@ class NoteClient(discord.Client):
             self.store.set_setting('discord_connection','古い操作メニューの無効表示を更新できませんでした。古い画面の実行は拒否しています。')
 
     async def retire_views(self,active,keep_root=False):
-        # Never let a late response disable a newer screen.
-        if active is not None and not active.root and active.session!=self.store.setting('discord_active_ui',''):
-            active_id=active.message_id or getattr(active.message,'id',None)
-            current_session=self.store.setting('discord_active_ui','')
-            same_message_current=active_id is not None and (
-                str(active_id)==str(self.store.setting('discord',{}).get('menu','')) or any(
-                    v is not active and v.session==current_session and
-                    str(v.message_id or getattr(v.message,'id',None))==str(active_id)
-                    for v in self.operation_views))
-            if same_message_current:
-                self.operation_views.discard(active)
-                active.stop()
-                return
+        ui=flow(self);state=ui.state();current=ui.current()
+        current_ids=set(state.get('message_ids',[state.get('message_id','')]))
+        if active is not None and active.session!=current:
             candidates=[active]
         else:
-            candidates=[v for v in self.operation_views if v is not active]
-        root=None
-        if active is not None and not active.root and not keep_root and candidates!=[active]:
-            config=self.store.setting('discord',{})
-            root=config.get('menu')
-            if root:
-                config['menu']=''
-                self.store.set_setting('discord',config)
-                if str(root)==str(active.message_id or getattr(active.message,'id','')):
-                    root=None
+            candidates=[v for v in self.operation_views if v.session!=current]
         for old in candidates:
             self.operation_views.discard(old)
-            old_id=old.message_id or getattr(old.message,'id',None)
-            active_id=(active.message_id or getattr(active.message,'id',None)) if active is not None else None
-            if active is not None and old is not active and old_id==active_id:
-                if not old.root: old.stop()
-                continue
-            for item in old.children: item.disabled=True
-            if old.message is not None:
-                try: await remove_old_controls(old.message)
+            old_id=str(old.message_id or getattr(old.message,'id',''))
+            if old_id not in current_ids and old.message is not None:
+                try:
+                    await remove_old_controls(old.message)
                 except discord.HTTPException:
-                    self.store.set_setting('discord_connection','古い操作画面の無効表示を更新できませんでした。実行は拒否しています。')
-            if not old.root: old.stop()
-        if root: await self.disable_menu(root)
+                    self.store.set_setting('discord_connection','古い操作画面の表示を更新できませんでした。')
+            for item in old.walk_children():
+                if hasattr(item,'disabled'):item.disabled=True
+            if not old.root:old.stop()
 
     async def disable_older_menus(self,channel):
         if not hasattr(channel,'history'): return
         async for message in channel.history(limit=None):
             if message.author.id!=self.user.id or str(message.id)==str(self.store.setting('discord',{}).get('menu','')): continue
             buttons=[item for row in message.components for item in getattr(row,'children',[])]
-            if buttons or message.content.startswith(
-                    ('操作メニュー（終了）','この操作画面は終了しています。')):
+            if buttons or (message.content or '').startswith(
+                    ('操作メニュー（終了）','この操作画面は終了しています。','受付しました。','処理中','処理結果を管理チャンネルへ通知します。')) or (
+                    '\n完了後に実行記録と操作メニューを表示します。\n受付番号: ' in (message.content or '')):
                 await self.disable_menu(message.id)
 
     async def guard(self,i):
-        if authorized(self.store,i.user.id,i.guild_id,i.channel_id): return True
-        await show_view(i,'send_message','登録した管理チャンネル・本人から操作してください。',ephemeral=True)
-        return False
+        return await flow(self).admit(i)
 
     async def accept(self,i,action,pid=None,data=None,already_deferred=False,ui_session=None,listing=('all',0,'')):
         if not authorized(self.store,i.user.id,i.guild_id,i.channel_id):
             return
         if not already_deferred:
-            await i.response.defer(ephemeral=True,thinking=getattr(i,'message',None) is None)
+            await flow(self).defer(i,thinking=getattr(i,'message',None) is None)
+        else:
+            i.extras['note_deferred']=True
+        if ui_session is not None and ui_session!=flow(self).current():
+            return await flow(self).obsolete(i)
         try:
             jid=submit(self.store,action,pid,data,str(i.id),ui_session=ui_session)
-            receipt='受付しました。処理結果は管理チャンネルへ通知します。\n受付番号: '+jid[:8]
-            saved=await i.edit_original_response(content=receipt,view=None)
-            message_id=getattr(getattr(i,'message',None),'id',None) or getattr(saved,'id',None)
-            for view in list(self.operation_views):
-                if str(view.message_id or getattr(view.message,'id',None))==str(message_id):
-                    self.operation_views.discard(view); view.stop()
-            config=self.store.setting('discord',{})
-            if str(config.get('menu'))==str(message_id):
-                config['menu']=''; self.store.set_setting('discord',config)
+            receipt='処理中: '+ACTION_NAMES.get(action,'記事操作')+'\n完了後に実行記録と操作メニューを表示します。\n受付番号: '+jid[:8]
+            flow(self).rebase(i)
+            message=await flow(self).progress(i,processing_frame(receipt,0))
+            if message is not None and getattr(message,'id',None):
+                private=bool(getattr(getattr(message,'flags',None),'ephemeral',False))
+                from .secrets import protect
+                token=protect(i.token) if private else ''
+                self.store.record_receipt(jid,message.id,i.channel_id,
+                    getattr(i,'application_id','') if private else '',token)
+                flow(self).animate_processing(jid,message,receipt)
         except (ValueError,RuntimeError) as exc:
             if ui_session is not None and self.store.setting('discord_active_ui','')!=ui_session:
-                await show_view(i,'followup',str(exc),ephemeral=True)
+                await flow(self).obsolete(i)
             else:
-                await show_view(i,'followup',str(exc),ephemeral=True,view=ActionResult(self,listing))
+                await self.finish_action(i,str(exc),deferred=True)
 
     async def setup_hook(self):
         self.add_view(Menu(self,root=True))
         self.notifications.start()
+        self.recovery_presence.start()
+
+    async def close(self):
+        self.notifications.cancel()
+        self.recovery_presence.cancel()
+        if hasattr(self,'ui'):await self.ui.close()
+        await super().close()
+
+    @tasks.loop(seconds=3)
+    async def recovery_presence(self):
+        if not self.is_ready(): return
+        from .schedule_activity import service
+        reservations=service(self.store)
+        reservations.expire()
+        await self.check_reservation_presence(reservations)
+        state=self.store.setting('remote_relogin_activity',{})
+        if not state.get('instance_id') or state.get('disconnected'): return
+        config=self.store.setting('discord',{})
+        from discord.http import Route
+        try:
+            instance=await self.http.request(Route('GET','/applications/{application_id}/activity-instances/{instance_id}',
+                application_id=config['application'],instance_id=state['instance_id']))
+            location=instance.get('location',{})
+            present=(str(config['owner']) in [str(user) for user in instance.get('users',[])] and
+                str(location.get('channel_id'))==str(config['channel']) and str(location.get('guild_id'))==str(config['guild']))
+        except discord.NotFound: present=False
+        except (discord.HTTPException,KeyError): return
+        current=self.store.setting('remote_relogin_activity',{})
+        if current.get('event_id')!=state.get('event_id') or current.get('disconnected'): return
+        if present:
+            if not state.get('seen'):
+                state['seen']=True;self.store.set_setting('remote_relogin_activity',state)
+            return
+        if state.get('seen') or now_ts()>state['deadline']:
+            from .relogin import manager
+            await asyncio.to_thread(manager(self.store).disconnected,state['recovery_id'])
+
+    async def check_reservation_presence(self,reservations):
+        launch=reservations.current_launch()
+        if not launch or not launch['instance'] or now_ts()<launch['expires']-580:
+            self.reservation_absence=None
+            return
+        from discord.http import Route
+        config=self.store.setting('discord',{})
+        try:
+            instance=await self.http.request(Route('GET','/applications/{application_id}/activity-instances/{instance_id}',
+                application_id=config['application'],instance_id=launch['instance']))
+            present=launch['owner'] in [str(user) for user in instance.get('users',[])]
+        except discord.NotFound:
+            present=False
+        except (discord.HTTPException,KeyError):
+            self.reservation_absence=None
+            return
+        if present:
+            self.reservation_absence=None
+        elif getattr(self,'reservation_absence',None)==launch['id']:
+            self.reservation_absence=None
+            reservations.closed(launch['id'])
+        else:
+            self.reservation_absence=launch['id']
 
     async def on_ready(self):
         if not hasattr(self,'setup_lock'):
@@ -763,33 +990,66 @@ class NoteClient(discord.Client):
         self.store.set_setting('discord',config)
         marker='note-stock:'+str(info.id)+':'+config['installation']
         channel=guild.get_channel(int(config.get('channel') or 0))
+        topic=getattr(channel,'topic','') or ''
+        previous_bot_channel=topic.startswith('note-stock:') and topic.split(':',2)[1]!=str(info.id)
+        def bot_can_view(target):
+            return not hasattr(target,'permissions_for') or target.permissions_for(guild.me).view_channel
+
+        replacing=(bool(config.get('replaced_application') or config.get('replacement_category'))
+                   or previous_bot_channel or (channel is not None and not bot_can_view(channel)))
+        if replacing:
+            # Old private channels grant access to the previous Bot. Reuse only
+            # a channel already created for this installation on a prior attempt.
+            channel=next((item for item in guild.text_channels if item.topic==marker and bot_can_view(item)),None)
+            config.pop('menu',None)
         if not channel:
-            channel=next((c for c in guild.text_channels if c.topic==marker),None)
+            channel=next((c for c in guild.text_channels if c.topic==marker and bot_can_view(c)),None)
         owner=await guild.fetch_member(int(config['owner']))
         overwrites={guild.default_role:discord.PermissionOverwrite(view_channel=False),
                     owner:discord.PermissionOverwrite(view_channel=True,send_messages=True,read_message_history=True),
                     guild.me:discord.PermissionOverwrite(view_channel=True,send_messages=True,read_message_history=True,embed_links=True,attach_files=True)}
-        category=guild.get_channel(int(config.get('category') or 0))
-        if category is None and channel is not None:
+        category_id=config.get('replacement_category') if replacing else config.get('category')
+        category=guild.get_channel(int(category_id or 0))
+        if category is not None and not bot_can_view(category):
+            category=None
+        if category is None and channel is not None and bot_can_view(channel.category):
             category=channel.category
-        if category is None:
+        async def create_private_category():
             category=await guild.create_category('アプリ管理',overwrites=overwrites,reason='本人専用のアプリ管理')
-            config['category']=str(category.id)
+            config['replacement_category' if replacing else 'category']=str(category.id)
             self.store.set_setting('discord',config)
-        if not channel:
-            channel=await guild.create_text_channel('note管理',category=category,overwrites=overwrites,topic=marker,reason='note投稿管理の本人専用チャンネル')
-        else:
+            return category
+
+        if channel:
             # Reapplying identical overwrites requires Manage Roles even though
             # creating this private channel only needs Manage Channels. Reconnect
             # must reuse the verified channel without requesting broader access.
             actual={target.id:value.pair() for target,value in channel.overwrites.items()}
             expected={target.id:value.pair() for target,value in overwrites.items()}
             changes={}
-            if channel.category_id!=category.id: changes['category']=category
+            if category is not None and channel.category_id!=category.id:
+                changes['category']=category
             if actual!=expected: changes['overwrites']=overwrites
             if changes:
-                await channel.edit(**changes,reason='管理チャンネルの本人専用権限を確認')
+                try:
+                    await channel.edit(**changes,reason='管理チャンネルの本人専用権限を確認')
+                except discord.Forbidden as exc:
+                    if exc.code!=50001:
+                        raise
+                    Diagnostics(self.store).error('discord_saved_channel_unavailable',exc,http_status=exc.status,discord_code=exc.code)
+                    replacing=True
+                    channel=None
+                    category=None
+                    config.pop('menu',None)
+        if not channel:
+            if category is None:
+                category=await create_private_category()
+            channel=await guild.create_text_channel('note管理',category=category,overwrites=overwrites,topic=marker,reason='note投稿管理の本人専用チャンネル')
         config['channel']=str(channel.id)
+        if category is not None:
+            config['category']=str(category.id)
+        config.pop('replaced_application',None)
+        config.pop('replacement_category',None)
         self.store.set_setting('discord',config)
         self.tree.copy_global_to(guild=guild)
         await self.tree.sync(guild=guild)
@@ -804,6 +1064,7 @@ class NoteClient(discord.Client):
             config['menu']=str(message.id)
             self.store.set_setting('discord',config)
         self.store.set_setting('discord_connection','管理メニュー準備完了')
+        flow(self).install(Menu(self,root=True),message_id=config['menu'])
         await NoteClient.disable_older_menus(self,channel)
 
     @tasks.loop(seconds=3)
@@ -848,6 +1109,29 @@ class NoteClient(discord.Client):
                 self.store.delivered(nid)
             except discord.HTTPException:
                 break
+        await self.cleanup_receipts()
+
+    async def cleanup_receipts(self):
+        for receipt in self.store.finished_receipts():
+            try:
+                if receipt['webhook_token']:
+                    webhook=discord.Webhook.partial(int(receipt['application_id']),unprotect(receipt['webhook_token']),client=self)
+                    message=await webhook.fetch_message(int(receipt['message_id']))
+                    content=message.content;embeds=message.embeds
+                else:
+                    message=await self.http.get_message(int(receipt['channel_id']),int(receipt['message_id']))
+                    content=message.get('content','');embeds=message.get('embeds',[])
+                # A transient screen can never authorize removing a final record
+                # or a newer screen that reused its message.
+                prefix=ACTION_NAMES.get(receipt['action'],'記事操作')+'.'
+                if (content or '').startswith(('受付しました。','処理中',prefix)) and not is_execution_record(content,embeds):
+                    if receipt['webhook_token']:await webhook.delete_message(int(receipt['message_id']))
+                    else:await self.http.delete_message(int(receipt['channel_id']),int(receipt['message_id']))
+                self.store.removed_receipt(receipt['job_id'])
+            except discord.NotFound:
+                self.store.removed_receipt(receipt['job_id'])
+            except (discord.HTTPException,ValueError,OSError):
+                self.store.set_setting('discord_connection','受付表示の片付けを再試行します。実行記録は保持しています。')
 
     async def on_disconnect(self):
         self.store.set_setting('discord_connection','切断・再接続待ち')
@@ -859,6 +1143,8 @@ class NoteClient(discord.Client):
         detail=type(error).__name__
         if isinstance(error,discord.HTTPException):
             detail+=f' / HTTP {error.status} / code {error.code}'
+        Diagnostics(self.store).error('discord_callback_error',error,callback=event_method,
+                                      http_status=getattr(error,'status',None), discord_code=getattr(error,'code',None))
         self.store.set_setting('discord_connection','Discord処理エラー（'+detail+'）。接続とBot権限を確認してください。')
 
 
@@ -868,23 +1154,36 @@ class BotThread(threading.Thread):
         self.store=store
         self.client=None
         self.loop=None
+        self.stop_requested=threading.Event()
     def run(self):
         for name in ('discord','aiohttp'):
             logger=logging.getLogger(name)
-            logger.handlers=[logging.NullHandler()]
+            if not any(isinstance(handler,logging.NullHandler) for handler in logger.handlers):
+                logger.addHandler(logging.NullHandler())
             logger.propagate=False
         try:
             token=unprotect(self.store.setting('discord_token',''))
             self.loop=asyncio.new_event_loop()
             asyncio.set_event_loop(self.loop)
             self.client=NoteClient(self.store)
-            self.loop.run_until_complete(self.client.start(token,reconnect=True))
+            if not self.stop_requested.is_set():
+                self.loop.run_until_complete(self.client.start(token,reconnect=True))
         except Exception as exc:
+            Diagnostics(self.store).error('discord_connection_error',exc)
             self.store.set_setting('discord_connection','接続できません（'+type(exc).__name__+'）。Bot設定を確認してください。')
         finally:
             if self.client and self.loop and not self.loop.is_closed():
                 self.loop.run_until_complete(self.client.close())
                 self.loop.close()
     def stop(self):
-        if self.client and self.loop and self.loop.is_running():
-            return asyncio.run_coroutine_threadsafe(self.client.close(),self.loop)
+        if self.stop_requested.is_set():
+            return
+        self.stop_requested.set()
+        if self.client and self.loop and not self.loop.is_closed():
+            def close_client():
+                if not self.client.is_closed():
+                    self.loop.create_task(self.client.close())
+            try:
+                self.loop.call_soon_threadsafe(close_client)
+            except RuntimeError:
+                pass

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import shutil
 import sqlite3
@@ -24,6 +25,23 @@ LOCKED = {"posting", "published", "unknown", "editing", "native_reserved", "nati
 
 def now_ts():
     return datetime.now(timezone.utc).timestamp()
+
+
+def article_timestamp(post, catalog):
+    restored = post.get('draft_restored_at', 0) if post['status'] == 'draft' else 0
+    value = catalog.get('remote_updated')
+    if value:
+        try:
+            number = float(value)
+            if math.isfinite(number):
+                return max(restored, number / 1000 if number > 100_000_000_000 else number)
+        except (ValueError, TypeError):
+            try:
+                parsed = datetime.fromisoformat(str(value).replace('Z', '+00:00'))
+                return max(restored, parsed.replace(tzinfo=parsed.tzinfo or JST).timestamp())
+            except (ValueError, TypeError, OverflowError):
+                pass
+    return restored or post['created']
 
 
 def tags_from_text(text):
@@ -74,7 +92,8 @@ class Store(RemoteStore):
             additions={'editor_kind':"TEXT NOT NULL DEFAULT 'legacy'",'native_ready':"INTEGER NOT NULL DEFAULT 0",
                        'native_html':"TEXT NOT NULL DEFAULT ''",'native_document':"TEXT NOT NULL DEFAULT '{}'",
                        'native_fingerprint':"TEXT NOT NULL DEFAULT ''",'native_payload':"TEXT NOT NULL DEFAULT ''",
-                       'native_owner':"TEXT NOT NULL DEFAULT ''",'native_summary':"TEXT NOT NULL DEFAULT '{}'"}
+                       'native_owner':"TEXT NOT NULL DEFAULT ''",'native_summary':"TEXT NOT NULL DEFAULT '{}'",
+                       'draft_restored_at':"REAL NOT NULL DEFAULT 0"}
             for name,definition in additions.items():
                 if name not in columns:
                     c.execute(f'ALTER TABLE posts ADD COLUMN {name} {definition}')
@@ -125,6 +144,8 @@ class Store(RemoteStore):
     def set_setting(self, key, value):
         with self.connect() as c:
             c.execute("INSERT OR REPLACE INTO settings VALUES(?,?)", (key, json.dumps(value, ensure_ascii=False)))
+        if key == 'diagnostics' and hasattr(self, 'diagnostic_session'):
+            self.diagnostic_session.configure(value is True)
 
     def settings_batch(self, values):
         results = {}
@@ -150,7 +171,16 @@ class Store(RemoteStore):
         with self.connect() as c:
             return self.decode(c.execute("SELECT * FROM posts WHERE id=?", (post_id,)).fetchone())
 
-    def posts(self):
+    def posts(self, *, with_catalog=False):
+        if with_catalog:
+            account = self.setting('account', '')
+            with self.connect() as c:
+                return [self.decode(row) for row in c.execute("""
+                    SELECT p.*, c.remote_status, c.remote_updated
+                    FROM posts p LEFT JOIN catalog c
+                    ON c.account=? AND c.note_key=p.draft_key AND c.post_id=p.id
+                    ORDER BY p.position,p.created
+                """, (account,))]
         with self.connect() as c:
             return [self.decode(row) for row in c.execute("SELECT * FROM posts ORDER BY position,created")]
 
@@ -204,6 +234,8 @@ class Store(RemoteStore):
         with self.connect() as c:
             c.execute("BEGIN IMMEDIATE")
             old = self.decode(c.execute("SELECT * FROM posts WHERE id=?", (post_id,)).fetchone())
+            if status in {'scheduled','queued'}:
+                self.require_schedulable(post_id,connection=c)
             if old["status"] in LOCKED:
                 raise ValueError("投稿中・投稿済み・結果未確認の原稿は編集できません。複製、または公開結果の確認を行ってください。")
             if status!='draft':
@@ -296,6 +328,8 @@ class Store(RemoteStore):
                 if row is None:
                     return None
             item = self.decode(row)
+            if item['status'] in {'scheduled','queued'}:
+                self.require_schedulable(item['id'],connection=c)
             if item['editor_kind']=='native' and not item['native_ready']:
                 raise ValueError('noteで編集し、公開設定をアプリへ取り込んでください。')
             if item['editor_kind']=='legacy' and (not item["title"] or not item["body"].strip()):
