@@ -64,7 +64,8 @@ def test_full_catalog_paginates_without_draft_filter_and_reports_completion(tmp_
     from note_stock.drafts import read_catalog
     with sync_playwright() as pw:
         browser=pw.chromium.launch(headless=True)
-        page=browser.new_page()
+        context=browser.new_context()
+        page=context.new_page()
         def route(route):
             if '/api/' in route.request.url:
                 last=route.request.url.endswith('2')

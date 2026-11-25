@@ -139,12 +139,12 @@ def test_discord_reservation_calendar_without_relay_queues_after_confirmation(tm
         pick=interaction()
         pick.message=days.message
         await day.callback(pick)
-        modal=pick.response.send_modal.call_args.args[0]
-        modal.clock._value='09:30'
+        clock=opened.message.edit.call_args.kwargs['view']
+        clock.hour,clock.minute=9,30
         entered=interaction()
-        entered.message=days.message
-        await modal.on_submit(entered)
-        confirmation=opened.message.edit.call_args.kwargs['view']
+        entered.message=opened.message
+        await clock.confirm.callback(entered)
+        confirmation=entered.response.edit_message.call_args.kwargs['view']
         assert store.next_job() is None
         await confirmation.yes.callback(interaction())
         job=store.next_job()

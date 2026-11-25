@@ -988,6 +988,8 @@ class NoteClient(discord.Client):
     async def accept(self,i,action,pid=None,data=None,already_deferred=False,ui_session=None,listing=('all',0,'')):
         if not authorized(self.store,i.user.id,i.guild_id,i.channel_id):
             return
+        if ui_session is not None and ui_session!=flow(self).current():
+            return await flow(self).obsolete(i)
         if not already_deferred:
             await flow(self).defer(i,thinking=getattr(i,'message',None) is None)
         else:

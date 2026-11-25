@@ -343,11 +343,11 @@ class NativeNoteBrowser(NoteBrowser):
         if baseline:
             self.sync_articles()
             latest=self.store.catalog_state(post['id'])
-            self.page=self.new_page()
             if latest.get('remote_status')=='published' and baseline.get('remote_status')!='published':
                 raise VerificationFailed('この記事はnote側ですでに公開されています。重複投稿を停止しました。')
             if baseline.get('remote_updated') and latest.get('remote_updated')!=baseline['remote_updated']:
                 raise VerificationFailed('予約後にnote側の記事が更新されています。内容と公開条件を確認して再予約してください。')
+            self.page=self.new_page()
         self.check_account()
         key=post['draft_key']
         self.page.goto(self.EDITOR+f'/notes/{key}/edit/',wait_until='domcontentloaded')
