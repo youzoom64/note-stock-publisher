@@ -183,7 +183,7 @@ class RemoteController(QObject):
                 action='prepare_publish_check' if publish_check or data.get('selection_read') else 'prepare_article'
             self.worker=BrowserWorker(self.store,action,post,parent=self)
             self.worker.background_read=bool(data.get('background_read'))
-            self.worker.headless_sync=self.background_sync
+            self.worker.headless_sync=action=='sync_articles'
             self.worker.items=['queue'] if data.get('queue') else data.get('tags',[])
             self.worker.tags_revision=data.get('tags_revision')
             self.worker.append_to_queue=bool(data.get('draft_queue'))

@@ -26,7 +26,7 @@ class BrowserWorker(QThread):
         self.tags_revision=None
         self.import_due=None
         self.recovery_id=''
-        self.headless_sync=False
+        self.headless_sync=action=='sync_articles'
         self.catalog_import=False
         self.background_read=False
         self.append_to_queue=False
@@ -92,6 +92,7 @@ class BrowserWorker(QThread):
             self.run_headless_sync(adapter)
             return
         log = Diagnostics(self.store)
+        sync_browser_opened=False
         try:
             from playwright.sync_api import sync_playwright
             error = '' if self.catalog_import else log.record("browser_start", action=self.action, post_id=(self.post or {}).get("id", ""))
@@ -130,6 +131,7 @@ class BrowserWorker(QThread):
                     browser_scope.enter_context(open_note_session(adapter, playwright))
                 else:
                     adapter.open(playwright)
+                    sync_browser_opened=self.action=='sync_articles'
                     if visible_read:
                         adapter.page.bring_to_front()
                 try:
@@ -342,6 +344,16 @@ class BrowserWorker(QThread):
                 except Exception as save_error:
                     log.error('pause_state_save_error',save_error,action=self.action)
                     message += " 一時停止設定も保存できませんでした。アプリを終了してください。"
+        finally:
+            if sync_browser_opened:
+                from .managed_browser import shutdown
+                self.progress.emit('同期に使った専用ブラウザーを終了しています。')
+                try:
+                    closed=shutdown(self.store.root)['closed']
+                except Exception:
+                    closed=False
+                if not closed:
+                    message+=' 同期用の専用ブラウザーを終了できませんでした。ブラウザーを閉じてください。'
         warning = '' if self.catalog_import else log.record("browser_finish", action=self.action, status=status)
         if warning:
             message += " " + warning
