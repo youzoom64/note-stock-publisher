@@ -7,6 +7,7 @@ from note_stock.headless_sync import open_note_session
 from note_stock.native import NativeNoteBrowser
 from note_stock.publisher import LoginRequired
 from note_stock.store import Store
+from note_stock.worker import BrowserWorker
 
 
 def test_background_page_uses_visible_unselected_target_and_detaches_even_on_error():
@@ -82,3 +83,23 @@ def test_headless_operation_login_failure_does_not_replay_write(monkeypatch):
     version_session.detach.assert_called_once()
     adapter.check_account.assert_called_once()
     visible.assert_not_called()
+
+
+def test_delete_uses_headless_session_without_opening_a_browser_window(tmp_path,monkeypatch):
+    store=Store(tmp_path)
+    pid=store.create({'title':'削除対象'})
+    store.checkpoint(pid,key='n123456789abc')
+    adapter=Mock()
+    adapter.delete_article.side_effect=lambda post:store.delete(post['id'])
+    session=Mock(return_value=nullcontext())
+    monkeypatch.setattr('note_stock.worker.NoteBrowser',lambda *args:adapter)
+    monkeypatch.setattr('playwright.sync_api.sync_playwright',lambda:nullcontext())
+    monkeypatch.setattr('note_stock.headless_sync.open_note_session',session)
+    results=[]
+    worker=BrowserWorker(store,'delete_note',store.get(pid))
+    worker.outcome.connect(lambda *result:results.append(result))
+    worker.run()
+    session.assert_called_once()
+    adapter.open.assert_not_called()
+    adapter.delete_article.assert_called_once()
+    assert results[0][0]=='deleted'

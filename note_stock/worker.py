@@ -8,7 +8,7 @@ from .diagnostics import Diagnostics
 from .publisher import LoginRequired
 from .native import NativeNoteBrowser as NoteBrowser
 
-HEADLESS_WRITES = frozenset({'save_note_draft', 'prepare_publish', 'publish'})
+HEADLESS_WRITES = frozenset({'save_note_draft', 'prepare_publish', 'publish', 'delete_note'})
 VISIBLE_OPERATIONS = frozenset({'preview_article','prepare_article','prepare_publish_check','prepare_schedule'})
 
 

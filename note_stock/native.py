@@ -164,8 +164,24 @@ class NativeNoteBrowser(NoteBrowser):
         self.page.goto(self.CORE+'/notes',wait_until='domcontentloaded')
         link=self.page.locator('a[href*="'+key+'"]')
         self._delete_stage='対象記事のリンク確認'
-        link.first.wait_for(state='visible',timeout=20000)
-        row=link.first.locator('xpath=ancestor::li[1]')
+        edit_name=post['title']+'を編集'
+        edit_button=self.page.get_by_role('button',name=edit_name,exact=True)
+        link.or_(edit_button).first.wait_for(state='visible',timeout=20000)
+        uses_edit_button=not link.count()
+        if uses_edit_button:
+            if edit_button.count()!=1:
+                raise VerificationFailed('同じ題名の記事が複数あり、削除対象を一意に確認できません。削除していません。')
+            self._delete_stage='対象記事のID確認'
+            edit_button.click()
+            self.editor_fields()
+            if self.draft_key(self.page.url)!=key:
+                raise VerificationFailed('選ばれた記事IDが削除対象と異なります。削除していません。')
+            self._delete_stage='記事管理へ戻る'
+            self.page.goto(self.CORE+'/notes',wait_until='domcontentloaded')
+            edit_button.wait_for(state='visible',timeout=20000)
+            row=edit_button.locator('xpath=ancestor::li[1]')
+        else:
+            row=link.first.locator('xpath=ancestor::li[1]')
         menu=row.locator('button[aria-haspopup="true"]')
         if menu.count()!=1:
             raise VerificationFailed('対象記事の操作メニューを一意に確認できません。削除しませんでした。')
@@ -205,7 +221,8 @@ class NativeNoteBrowser(NoteBrowser):
         self._delete_stage='削除後の記事一覧を再確認'
         self.page.reload(wait_until='domcontentloaded')
         self.page.wait_for_timeout(1200)
-        if self.page.locator('a[href*="'+key+'"]').count():
+        if (self.page.locator('a[href*="'+key+'"]').count()
+                or (uses_edit_button and self.page.get_by_role('button',name=edit_name,exact=True).count())):
             raise VerificationFailed('記事管理に削除対象が残っています。結果を確認してください。')
         with self.store.connect() as c:
             c.execute('DELETE FROM catalog WHERE post_id=?',(post['id'],))
