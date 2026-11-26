@@ -11,6 +11,7 @@ ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
 from note_stock import __version__
 entries=[ROOT/name for name in ('main.py','requirements.txt','setup.ps1','start.cmd','README.md','manual.html','VALIDATION.md','THIRD_PARTY_NOTICES.md')]
+entries.extend(path for path in (ROOT/'guide').rglob('*') if path.is_file())
 entries.extend(path for path in (ROOT/'note_stock').rglob('*.py') if '__pycache__' not in path.parts)
 entries.append(ROOT/'note_stock'/'discord-manual-setup.html')
 entries.extend(sorted((ROOT/'note_stock'/'calendar_data').glob('*.*')))
@@ -19,7 +20,7 @@ entries.append(ROOT/'scripts'/'package_source.py')
 activity_assets=tuple(ROOT/'extensions/remote_relogin/plugin/web'/name for name in ('index.html','style.css','app.js'))
 entries.extend(activity_assets)
 for path in entries:
-    if path.suffix == '.wav':
+    if path.suffix in {'.wav','.png','.jpg'}:
         continue
     content=path.read_text(encoding='utf-8-sig')
     if path.suffix=='.py':
