@@ -23,7 +23,7 @@ def headless_adapter(monkeypatch):
 
 
 @pytest.mark.parametrize('submitted,login_error,expected', [(False,False,'failed'),(True,False,'unknown'),(False,True,'held')])
-def test_worker_persists_failure_boundary_and_pauses(tmp_path, monkeypatch, headless_adapter, submitted, login_error, expected):
+def test_worker_persists_article_failure_and_pauses_only_for_login(tmp_path, monkeypatch, headless_adapter, submitted, login_error, expected):
     store = Store(tmp_path)
     store.set_setting('paused', False)
     pid = store.create({'editor_kind':'legacy'})
@@ -46,7 +46,7 @@ def test_worker_persists_failure_boundary_and_pauses(tmp_path, monkeypatch, head
     assert outputs == [expected]
     assert len(headless_adapter) == 1
     assert store.get(pid)['status'] == expected
-    assert store.setting('paused') is True
+    assert store.setting('paused') is login_error
 
 
 def test_two_instances_cannot_lock_same_store(tmp_path):

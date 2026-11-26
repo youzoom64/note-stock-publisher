@@ -178,7 +178,11 @@ class ScreenLifecycle:
         if not hasattr(client,'operation_views'): client.operation_views=set()
 
     async def on_error(self,interaction,error,item):
-        await self.client.finish_action(interaction,'操作を完了できませんでした（'+type(error).__name__+'）。',
+        Diagnostics(self.client.store).error('discord_view_error',error,
+            http_status=getattr(error,'status',None),discord_code=getattr(error,'code',None))
+        message=('Discordの画面更新に失敗しました。記事の処理結果は操作履歴で確認してください。'
+                 if isinstance(error,discord.HTTPException) else '操作を完了できませんでした（'+type(error).__name__+'）。')
+        await self.client.finish_action(interaction,message,
                                         deferred=interaction.response.is_done())
 
     async def on_timeout(self):

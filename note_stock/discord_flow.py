@@ -58,8 +58,14 @@ class DiscordUI:
         if not self.responded(i): await i.response.defer(ephemeral=True,thinking=thinking)
         i.extras['note_deferred']=True
         if show_loading and self.valid(i):
-            await i.edit_original_response(content=loading_text(self.client),
-                                           view=None,embeds=[],attachments=[])
+            flags=getattr(getattr(i,'message',None),'flags',None)
+            if getattr(flags,'value',0) & 32768:
+                view=discord.ui.LayoutView()
+                view.add_item(discord.ui.TextDisplay(loading_text(self.client)))
+                await i.edit_original_response(view=view,attachments=[])
+            else:
+                await i.edit_original_response(content=loading_text(self.client),
+                                               view=None,embeds=[],attachments=[])
 
     async def obsolete(self,i):
         # A modal may refer to the SAME message now containing a newer menu.
@@ -148,7 +154,7 @@ class DiscordUI:
                 # Article rows belong to one screen. Always edit its anchor,
                 # then retire every row, including the one that was clicked.
                 # This also avoids replies pointing at a deleted source.
-                await self.defer(i)
+                await self.defer(i,show_loading=False)
                 kwargs.pop('ephemeral',None);kwargs.pop('wait',None)
                 message=await anchor.edit(**kwargs);source=anchor;editing=True
             elif method=='deferred' or (method=='followup' and source is not None):
@@ -249,7 +255,13 @@ class DiscordUI:
     async def finish(self,i,message,ok=False):
         if not self.valid(i): return await self.obsolete(i)
         self.store.notification(ok,message,key='interaction:'+str(i.id))
-        await self.progress(i,'処理結果を管理チャンネルへ通知します。')
+        try:
+            await self.progress(i,'処理結果を管理チャンネルへ通知します。')
+        except discord.HTTPException as exc:
+            # The durable result already exists. A failed screen update must
+            # not turn it into another operation failure and recurse on_error.
+            from .diagnostics import Diagnostics
+            Diagnostics(self.store).error('discord_result_screen_update_failed',exc)
 
 
 class ManagedModal(discord.ui.Modal):

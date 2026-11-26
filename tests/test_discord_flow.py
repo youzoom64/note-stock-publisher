@@ -119,6 +119,7 @@ def test_article_message_group_has_one_lifecycle_and_leaves_no_old_controls(tmp_
             click=interaction();click.message=part.message
             assert await part.interaction_check(click)
         row=listing.parts[-2];click=interaction();click.message=row.message
+        click.edit_original_response.side_effect=AssertionError('Do not edit the V2 article row as a legacy loading message')
         assert await row.interaction_check(click)
         await article_buttons(row)[-1].callback(click)
         detail=i.message.edit.call_args.kwargs['view']
@@ -131,6 +132,7 @@ def test_article_message_group_has_one_lifecycle_and_leaves_no_old_controls(tmp_
         await detail.back.callback(back)
         restored=back.response.edit_message.call_args.kwargs['view']
         footer=restored.parts[-1];home=interaction();home.message=footer.message
+        home.edit_original_response.side_effect=AssertionError('Do not edit the V2 footer as a legacy loading message')
         assert await footer.interaction_check(home)
         await footer.back.callback(home)
         menu=back.message.edit.call_args.kwargs['view']

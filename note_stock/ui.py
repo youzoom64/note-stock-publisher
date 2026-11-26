@@ -1886,6 +1886,8 @@ class MainWindow(QMainWindow):
                     '未保存の編集があります。保存すると自動投稿を再開します。' if needs_save else '')
         except Exception as exc:
             self.timer.stop()
+            from .diagnostics import Diagnostics
+            Diagnostics(self.store).error('automatic_posting_stopped',exc,action='scheduler')
             try:
                 self.store.set_setting("paused", True)
                 self.refresh()

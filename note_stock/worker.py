@@ -313,6 +313,7 @@ class BrowserWorker(QThread):
             message = (str(exc) if isinstance(exc, (ValueError, RuntimeError)) and not type(exc).__module__.startswith("playwright")
                        else "note画面の操作に失敗しました（" + type(exc).__name__ + "）。ログイン・接続状況を確認してください。")
             status = 'cancelled' if isinstance(exc,RecoveryStopped) else 'failed'
+            result_save_failed=False
             if self.post:
                 try:
                     if self.action=='prepare_publish_check' and not self.catalog_import:
@@ -327,12 +328,17 @@ class BrowserWorker(QThread):
                         status = "unknown" if current["submitted"] or self.action == "verify" else ("held" if isinstance(exc, LoginRequired) else "failed")
                         self.store.finish(self.post["id"], status, message)
                 except Exception as save_error:
+                    result_save_failed=True
                     log.error('browser_result_save_error',save_error,action=self.action)
                     status = "unknown"
                     message += " 結果の保存にも失敗しました。次回起動時に公開結果を確認してください。"
-            if self.action not in {'preview_article','prepare_publish_check'} or isinstance(exc,LoginRequired):
+            if isinstance(exc,LoginRequired) or result_save_failed:
                 try:
                     self.store.set_setting("paused", True)
+                    log.record('automatic_posting_stopped',action=self.action,
+                               reason='login_required' if isinstance(exc,LoginRequired) else 'result_save_failed')
+                    message += (' noteへの再ログインが必要なため、自動投稿を停止しました。'
+                                if isinstance(exc,LoginRequired) else ' 処理結果を保存できないため、自動投稿を停止しました。')
                 except Exception as save_error:
                     log.error('pause_state_save_error',save_error,action=self.action)
                     message += " 一時停止設定も保存できませんでした。アプリを終了してください。"

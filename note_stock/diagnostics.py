@@ -41,6 +41,10 @@ class Diagnostics:
             return
         if isinstance(exc, BaseException):
             fields['exception'] = type(exc).__name__
+            for attribute,key in [('status','http_status'),('code','discord_code')]:
+                value=getattr(exc,attribute,None)
+                if type(value) is int:
+                    fields.setdefault(key,value)
             fields['stack'] = [f'{frame.filename}:{frame.lineno}:{frame.name}'
                                for frame in traceback.extract_tb(exc.__traceback__, limit=-12)]
         self.record(event, level='error', **fields)
