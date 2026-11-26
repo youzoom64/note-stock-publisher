@@ -397,6 +397,19 @@ class Store(RemoteStore):
                 raise ValueError("投稿中・結果未確認の原稿は削除できません。")
             c.execute("DELETE FROM posts WHERE id=?", (post_id,))
 
+    def restore_draft(self, post_id):
+        """Dismiss a local failure/review state without touching article contents."""
+        with self.connect() as c:
+            c.execute('BEGIN IMMEDIATE')
+            row=c.execute('SELECT status,error FROM posts WHERE id=?',(post_id,)).fetchone()
+            if not row or row['status'] not in {'failed','held','unknown','overdue','review'}:
+                raise ValueError('この記事は要確認の状態ではありません。一覧を更新してください。')
+            stamp=now_ts()
+            c.execute("UPDATE posts SET status='draft',due=NULL,error='',draft_restored_at=?,updated=? WHERE id=?",
+                      (stamp,stamp,post_id))
+            self.event(c,post_id,'draft','要確認から下書きへ戻しました。以前の状態: '+row['status']+
+                       (' / 理由: '+row['error'] if row['error'] else ''),stamp)
+
     def reorder(self, post_id, direction):
         with self.connect() as c:
             c.execute("BEGIN IMMEDIATE")

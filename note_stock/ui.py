@@ -161,9 +161,10 @@ class ArticleRowDelegate(QStyledItemDelegate):
         metrics = painter.fontMetrics()
         text = index.data(Qt.ItemDataRole.DisplayRole)
         lines = text.split('\n')
+        actions_width=160 if index.data(Qt.ItemDataRole.UserRole+1) in ARTICLE_FILTERS['review'][1] else 0
         baseline = row.top() + (row.height() - len(lines) * metrics.height()) // 2 + metrics.ascent()
         for line in lines:
-            elided = metrics.elidedText(line, Qt.TextElideMode.ElideRight, max(0, row.right() - text_left - 10))
+            elided = metrics.elidedText(line, Qt.TextElideMode.ElideRight, max(0, row.right() - text_left - 10-actions_width))
             painter.drawText(text_left, baseline, elided)
             baseline += metrics.height()
         painter.restore()
@@ -1186,7 +1187,7 @@ class MainWindow(QMainWindow):
         summary=p.get('native_summary',{})
         price=summary.get('price',0)
         kind=(f'有料 {price}円' if price else ('限定公開' if summary.get('limited') else '無料公開'))
-        readiness=('取り込み済み · '+kind+' · 投稿先 '+p.get('native_owner','')+' · '+summary.get('status','')) if p.get('native_ready') else '選択した記事の本文・公開条件を自動取得します。予約時にも取得を確認します。'
+        readiness=('取り込み済み · '+kind+' · 投稿先 '+p.get('native_owner','')+' · '+summary.get('status','')) if p.get('native_ready') else '記事をダブルクリックすると本文・公開条件を取得します。'
         self.error_label.setText(p.get("error", "") or (readiness if p else ''))
 
     def refresh_list(self, *_):
@@ -1252,6 +1253,19 @@ class MainWindow(QMainWindow):
                     item.setToolTip(tooltip)
                     item.setBackground(QColor(color))
                     self.list.addItem(item)
+                    if status_by_id[pid] in ARTICLE_FILTERS['review'][1]:
+                        actions=QWidget()
+                        actions.setObjectName('article_row_actions')
+                        actions.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+                        layout=QHBoxLayout(actions)
+                        layout.setContentsMargins(0,0,12,0)
+                        layout.addStretch()
+                        restore=button('下書きに戻す',lambda _=False,pid=pid:self.restore_article_draft(pid))
+                        restore.setObjectName('restore_draft_'+pid)
+                        restore.setFixedWidth(140)
+                        restore.setToolTip('この記事を下書きへ戻します。本文とハッシュタグは保持します。')
+                        layout.addWidget(restore,0,Qt.AlignmentFlag.AlignVCenter)
+                        self.list.setItemWidget(item,actions)
                 self._displayed_rows = rows
             selected_row = next((index for index, row in enumerate(rows) if row[0] == self.current_id), -1)
             if self.list.currentRow() != selected_row:
@@ -1277,6 +1291,18 @@ class MainWindow(QMainWindow):
             self.fail(exc)
         self._displayed_rows=None
         self.refresh()
+
+    def restore_article_draft(self,post_id):
+        try:
+            if post_id==self.current_id and not self.can_leave():
+                return
+            self.store.restore_draft(post_id)
+            if post_id==self.current_id:
+                self.load(post_id)
+            self.refresh()
+            self.statusBar().showMessage('下書きに戻しました。',5000)
+        except Exception as exc:
+            self.fail(exc)
 
     def update_check_controls(self):
         count = len(self.checked_ids)
