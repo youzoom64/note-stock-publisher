@@ -1,12 +1,13 @@
-"""Analog time selection for the desktop posting date fields."""
+"""Time selection controls for desktop posting fields."""
 
 from math import atan2, cos, floor, hypot, pi, sin
 
-from PySide6.QtCore import QDate, QEvent, QPointF, QRectF, Qt, QTime, Signal
+from PySide6.QtCore import QDate, QEvent, QPoint, QPointF, QRectF, Qt, QTime, QTimer, Signal
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import (
-    QButtonGroup, QDialog, QDialogButtonBox, QHBoxLayout, QLabel, QPushButton,
-    QTimeEdit, QVBoxLayout, QWidget,
+    QAbstractItemView, QApplication, QButtonGroup, QDialog, QDialogButtonBox,
+    QFrame, QHBoxLayout, QLabel, QListWidget, QPushButton, QSizePolicy,
+    QTimeEdit, QToolButton, QVBoxLayout, QWidget,
 )
 from .calendar_notes import DateNotes
 
@@ -223,27 +224,133 @@ class PostingTimeDialog(QDialog):
         super().accept()
 
 
-class ClockTimeEdit(QWidget):
+class TimePickerPopup(QFrame):
+    confirmed=Signal(QTime)
+
+    def __init__(self,parent):
+        super().__init__(parent,Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
+        self.setObjectName('time_picker_popup')
+        self.setAttribute(Qt.WidgetAttribute.WA_NoMouseReplay)
+        self.setAccessibleName('投稿時刻を選ぶ')
+        self.setStyleSheet('''
+            QFrame#time_picker_popup {background:white; border:1px solid #cad8cf; border-radius:7px;}
+            QListWidget {background:white; color:#25342f; border:0; outline:0;}
+            QListWidget::item {height:30px; padding:0; border:0; border-radius:4px;}
+            QListWidget::item:selected {background:#d8eee3; color:#106b4b; font-weight:600;}
+            QListWidget::item:hover:!selected {background:#eef6f1;}
+            QLabel {color:#687a72; background:transparent; border:0;}
+        ''')
+        layout=QVBoxLayout(self)
+        layout.setContentsMargins(9,9,9,9)
+        layout.setSpacing(8)
+        columns=QHBoxLayout()
+        self.hours=QListWidget()
+        self.minutes=QListWidget()
+        for title,control,count in (('時',self.hours,24),('分',self.minutes,60)):
+            column=QVBoxLayout()
+            column.setSpacing(4)
+            caption=QLabel(title)
+            caption.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            column.addWidget(caption)
+            control.setAccessibleName('時（00〜23）' if count==24 else '分（00〜59）')
+            control.setFixedSize(80,224)
+            control.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            control.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+            for value in range(count):
+                control.addItem(f'{value:02d}')
+                control.item(value).setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            control.installEventFilter(self)
+            column.addWidget(control)
+            columns.addLayout(column)
+        layout.addLayout(columns)
+        footer=QHBoxLayout()
+        self.now_button=QPushButton('現在')
+        self.now_button.clicked.connect(lambda:self.select_time(QTime.currentTime()))
+        self.confirm_button=QPushButton('決定')
+        self.confirm_button.setObjectName('primary')
+        self.confirm_button.clicked.connect(self.apply_time)
+        footer.addWidget(self.now_button)
+        footer.addWidget(self.confirm_button)
+        layout.addLayout(footer)
+        self.setFixedSize(self.sizeHint())
+
+    def select_time(self,time):
+        for control,value in ((self.hours,time.hour()),(self.minutes,time.minute())):
+            control.setCurrentRow(value)
+            control.scrollToItem(control.currentItem(),QAbstractItemView.ScrollHint.PositionAtCenter)
+
+    def open_at(self,anchor,time):
+        self.select_time(time)
+        below=anchor.mapToGlobal(QPoint(0,anchor.height()+4))
+        screen=QApplication.screenAt(below) or anchor.screen()
+        area=screen.availableGeometry()
+        x=max(area.left(),min(below.x(),area.right()-self.width()+1))
+        y=below.y()
+        if y+self.height()>area.bottom()+1:
+            y=anchor.mapToGlobal(QPoint(0,-self.height()-4)).y()
+        y=max(area.top(),min(y,area.bottom()-self.height()+1))
+        self.move(x,y)
+        self.show()
+        # Recenter after showing, when scroll ranges have their final sizes.
+        self.select_time(time)
+        self.hours.setFocus(Qt.FocusReason.PopupFocusReason)
+
+    def apply_time(self):
+        time=QTime(self.hours.currentRow(),self.minutes.currentRow())
+        if time.isValid():
+            self.confirmed.emit(time)
+            self.hide()
+
+    def eventFilter(self,watched,event):
+        if event.type()==QEvent.Type.KeyPress:
+            if event.key() in (Qt.Key.Key_Return,Qt.Key.Key_Enter):
+                self.apply_time()
+                return True
+            if event.key()==Qt.Key.Key_Escape:
+                self.hide()
+                return True
+            if event.key() in (Qt.Key.Key_Left,Qt.Key.Key_Right):
+                (self.minutes if watched is self.hours else self.hours).setFocus()
+                return True
+        return super().eventFilter(watched,event)
+
+
+class ClockTimeEdit(QFrame):
     timeChanged=Signal(QTime)
 
     def __init__(self, time, parent=None):
         super().__init__(parent)
-        self.clock_open = False
+        self.setObjectName('time_picker_field')
+        self.setStyleSheet('''
+            QFrame#time_picker_field {background:white; border:1px solid #cddbd2; border-radius:5px;}
+            QFrame#time_picker_field QTimeEdit {border:0; background:transparent; padding:7px;}
+            QFrame#time_picker_field QToolButton {border:0; background:transparent; color:#687a72; padding:7px;}
+            QFrame#time_picker_field QToolButton:hover {background:#eaf4ee;}
+        ''')
+        self.setFixedWidth(180)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed,QSizePolicy.Policy.Fixed)
         self.editor=QTimeEdit(time,self)
         self.editor.setButtonSymbols(QTimeEdit.ButtonSymbols.NoButtons)
-        self.editor.setToolTip('数字を直接入力して時刻を変更できます。')
+        self.editor.setToolTip('クリックして時・分を選択します。数字の直接入力もできます。')
         self.editor.timeChanged.connect(self.timeChanged.emit)
-        self.clock_button=QPushButton(self)
-        self.clock_button.setText('時計')
-        self.clock_button.setAccessibleName('時計で時刻を選ぶ')
-        self.clock_button.setToolTip('時計を開いて時刻を選びます。')
-        self.clock_button.clicked.connect(self.open_clock)
+        self.editor.lineEdit().installEventFilter(self)
+        self.editor.installEventFilter(self)
+        self.popup_button=QToolButton(self)
+        self.popup_button.setText('▾')
+        self.popup_button.setAccessibleName('時・分の選択を開く')
+        self.popup_button.setToolTip('時・分を選びます。')
+        self.popup_button.clicked.connect(self.open_popup)
+        self.popup=TimePickerPopup(self)
+        self.popup.confirmed.connect(self.setTime)
         layout=QHBoxLayout(self)
-        layout.setContentsMargins(0,0,0,0)
-        layout.setSpacing(6)
+        layout.setContentsMargins(1,1,1,1)
+        layout.setSpacing(0)
         layout.addWidget(self.editor,1)
-        layout.addWidget(self.clock_button)
+        layout.addWidget(self.popup_button)
         self.setFocusProxy(self.editor)
+
+    def lineEdit(self):
+        return self.editor.lineEdit()
 
     def time(self):
         return self.editor.time()
@@ -260,13 +367,15 @@ class ClockTimeEdit(QWidget):
     def interpretText(self):
         self.editor.interpretText()
 
-    def open_clock(self):
-        if self.clock_open:
-            return
-        self.clock_open = True
-        try:
-            dialog = PostingTimeDialog(QDate.currentDate(), self.time(), self)
-            if dialog.exec() == QDialog.DialogCode.Accepted:
-                self.setTime(dialog.time_edit.time())
-        finally:
-            self.clock_open = False
+    def open_popup(self):
+        if self.isVisible() and self.isEnabled() and not self.popup.isVisible():
+            self.editor.interpretText()
+            self.popup.open_at(self,self.time())
+
+    def eventFilter(self,watched,event):
+        if event.type()==QEvent.Type.MouseButtonPress and event.button()==Qt.MouseButton.LeftButton:
+            QTimer.singleShot(0,self.open_popup)
+        elif event.type()==QEvent.Type.KeyPress and event.key()==Qt.Key.Key_F4:
+            self.open_popup()
+            return True
+        return super().eventFilter(watched,event)

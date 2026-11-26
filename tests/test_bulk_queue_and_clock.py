@@ -8,7 +8,7 @@ from PySide6.QtGui import QImage
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QStyle, QStyleOptionViewItem
 
-from note_stock.clock_picker import PostingTimeDialog
+from note_stock.clock_picker import TimePickerPopup
 from note_stock.remote import submit
 from note_stock.store import Store, Scheduler, JST
 from note_stock.ui import MainWindow, SettingsDialog
@@ -192,26 +192,62 @@ def test_tray_close_keeps_processing_and_icon_opens_window(screen,qt_application
 
 
 @pytest.mark.parametrize("accepted", [True, False])
-def test_settings_time_click_opens_clock_and_saves_only_accepted_time(tmp_path, qt_application, accepted):
+def test_settings_time_popup_saves_only_confirmed_selection(tmp_path, qt_application, accepted):
     store = Store(tmp_path)
     settings = SettingsDialog(store)
     settings.show()
     qt_application.processEvents()
     previous = settings.time.time()
-    opened = []
-    def choose():
-        dialog = QApplication.activeModalWidget()
-        opened.append(isinstance(dialog, PostingTimeDialog))
-        if isinstance(dialog, PostingTimeDialog):
-            dialog.time_edit.setTime(QTime(14, 35))
-            dialog.accept() if accepted else dialog.reject()
-    QTimer.singleShot(50, choose)
     try:
         QTest.mouseClick(settings.time.lineEdit(), Qt.MouseButton.LeftButton)
-        QTest.qWait(80)
-        assert opened == [True]
+        QTest.qWait(30)
+        popup=settings.time.popup
+        assert isinstance(popup,TimePickerPopup) and popup.isVisible()
+        assert QApplication.activeModalWidget() is None
+        assert popup.hours.currentRow()==previous.hour()
+        assert popup.minutes.currentRow()==previous.minute()
+        for control,value in ((popup.hours,14),(popup.minutes,35)):
+            item=control.item(value)
+            control.scrollToItem(item)
+            qt_application.processEvents()
+            QTest.mouseClick(control.viewport(),Qt.MouseButton.LeftButton,pos=control.visualItemRect(item).center())
+        assert settings.time.time()==previous
+        assert store.setting('recurrence',{'time':'09:00'})['time']==previous.toString('HH:mm')
+        if accepted:
+            QTest.mouseClick(popup.confirm_button,Qt.MouseButton.LeftButton)
+        else:
+            QTest.keyClick(popup.minutes,Qt.Key.Key_Escape)
         expected = "14:35" if accepted else previous.toString("HH:mm")
+        assert not popup.isVisible()
         assert settings.time.time().toString("HH:mm") == expected
         assert store.setting("recurrence", {"time": "09:00"})["time"] == expected
+        settings.time.open_popup()
+        assert popup.hours.currentRow()==settings.time.time().hour()
+        assert popup.minutes.currentRow()==settings.time.time().minute()
+        popup.hide()
+    finally:
+        settings.close()
+
+
+def test_time_popup_keyboard_and_screen_bounds(tmp_path,qt_application):
+    settings=SettingsDialog(Store(tmp_path))
+    settings.show()
+    qt_application.processEvents()
+    try:
+        field=settings.time
+        area=field.screen().availableGeometry()
+        settings.move(area.right()-settings.width()+1,area.bottom()-settings.height()+1)
+        field.setTime(QTime(23,59))
+        QTest.keyClick(field.editor,Qt.Key.Key_F4)
+        popup=field.popup
+        assert popup.isVisible()
+        assert area.contains(popup.geometry())
+        assert popup.hours.currentRow()==23 and popup.minutes.currentRow()==59
+        QTest.keyClick(popup.hours,Qt.Key.Key_Up)
+        QTest.keyClick(popup.hours,Qt.Key.Key_Right)
+        QTest.keyClick(popup.minutes,Qt.Key.Key_Up)
+        QTest.keyClick(popup.minutes,Qt.Key.Key_Return)
+        assert field.time()==QTime(22,58)
+        assert not popup.isVisible()
     finally:
         settings.close()
