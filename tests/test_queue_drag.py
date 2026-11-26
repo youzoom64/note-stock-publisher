@@ -26,6 +26,7 @@ def test_queue_drag_preserves_fixed_time_and_only_queue_rows_are_draggable(tmp_p
     window=MainWindow(store,offline=True)
     try:
         window.show()
+        assert not window.order_buttons['planned'].isEnabled()
         window.filter_buttons["queued"].click()
         qt_application.processEvents()
         assert [window.list.item(i).data(Qt.ItemDataRole.UserRole) for i in range(3)]==[first,fixed,last]
@@ -53,6 +54,19 @@ def test_queue_drag_preserves_fixed_time_and_only_queue_rows_are_draggable(tmp_p
         with pytest.raises(ValueError,match="キューの状態"):
             store.set_queue_order([first,fixed],stamp)
         assert {pid:store.get(pid) for pid in before}==before
+        window.order_buttons['oldest'].click()
+        window.order_buttons['planned'].click()
+        for key in window.filter_buttons:
+            if key=='queued':
+                continue
+            window.filter_buttons[key].click()
+            assert not window.order_buttons['planned'].isEnabled()
+            assert window.order_buttons['oldest'].isChecked()
+            window.order_buttons['planned'].setChecked(True)
+            assert not window.order_buttons['planned'].isChecked()
+            window.filter_buttons['queued'].click()
+            assert window.order_buttons['planned'].isEnabled()
+            assert window.order_buttons['planned'].isChecked()
     finally:
         window.quitting=True
         window.close()

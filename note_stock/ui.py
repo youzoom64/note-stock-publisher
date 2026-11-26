@@ -870,6 +870,7 @@ class MainWindow(QMainWindow):
             radio.setProperty('order', key)
             radio.setAccessibleName(f"記事の並べ替え: {name}")
             if key=='planned':
+                radio.setEnabled(False)
                 radio.setToolTip('投稿予定が早い順に表示します。黄色のキューはドラッグで順番を変更でき、茶色の日時指定は固定です。')
             elif key != 'manual':
                 radio.setToolTip("noteの更新日時で並べ替えます。未同期の記事は登録日時を使います。")
@@ -1211,7 +1212,7 @@ class MainWindow(QMainWindow):
             visible = [p for p in posts if (not statuses or p["status"] in statuses) and
                        query in (p["title"] + "\n" + p["body"] + " " + " ".join(p["tags"])).casefold()]
             order = self.order_group.checkedButton().property('order')
-            if order == 'planned':
+            if order == 'planned' and filter_key=='queued':
                 visible.sort(key=lambda post:posting_order_key(post,planned))
             elif order != 'manual':
                 visible.sort(key=lambda post: article_timestamp(post, post), reverse=order == 'newest')
@@ -1681,12 +1682,22 @@ class MainWindow(QMainWindow):
 
     def filter_changed(self, identifier, checked):
         if checked:
-            if self.filter_group.checkedButton().property('status')=='queued':
+            pending=self.filter_group.checkedButton().property('status')=='queued'
+            self.order_buttons['planned'].setEnabled(pending)
+            if pending:
                 self.order_buttons['planned'].setChecked(True)
+            elif self.order_buttons['planned'].isChecked():
+                self.order_buttons[getattr(self,'normal_article_order','newest')].setChecked(True)
             self.refresh_list()
 
     def order_changed(self, radio, checked):
         if checked:
+            order=radio.property('order')
+            if order=='planned' and self.filter_group.checkedButton().property('status')!='queued':
+                self.order_buttons[getattr(self,'normal_article_order','newest')].setChecked(True)
+                return
+            if order!='planned':
+                self.normal_article_order=order
             manual = radio is self.order_buttons['manual']
             self.move_up.setEnabled(manual)
             self.move_down.setEnabled(manual)
