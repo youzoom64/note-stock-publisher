@@ -20,7 +20,7 @@ def screen(tmp_path, qt_application):
     store = Store(tmp_path)
     store.set_setting("account", "tester")
     store.set_setting("account_verified", True)
-    ids = [store.create({"title": f"下書き {i}", "body": "本文"}) for i in range(3)]
+    ids = [store.create({"editor_kind":"legacy","title": f"下書き {i}", "body": "本文"}) for i in range(3)]
     published = store.create({"title": "公開済み"})
     store.finish(published, "published", url="https://note.com/tester/n/n123456789abc")
     window = MainWindow(store, offline=True)
@@ -56,7 +56,8 @@ def test_checkbox_click_all_clear_refresh_and_batch_enqueue(screen, qt_applicati
     jobs = store.operation_history()["items"]
     assert {job["post_id"] for job in jobs} == set(ids)
     assert all(job["data"]["queue"] and job["data"]["draft_queue"] for job in jobs)
-    assert any("キュー追加中" in window.list.item(i).text() for i in range(window.list.count()))
+    assert all(job['state']=='done' for job in jobs)
+    assert all(store.get(pid)['status']=='queued' for pid in ids)
     window.check_all_button.click()
     window.queue_checked_button.click()
     assert store.operation_history()["total"] == 3
@@ -90,8 +91,8 @@ def test_bulk_queue_rechecks_changed_article_before_browser_work(screen, monkeyp
     window.remote_controller.tick()
     worker.assert_not_called()
     job = store.operation_history()["items"][0]
-    assert job["state"] == "failed"
-    assert "下書きの状態が変わりました" in job["result"]["message"]
+    assert job["state"] == "done"
+    assert store.get(ids[0])['status']=='published'
 
 
 def test_queue_worker_finishes_in_queue_with_existing_save_path(tmp_path, monkeypatch):
@@ -131,13 +132,7 @@ def test_bulk_receipt_follows_displayed_order(screen):
     window.refresh_list()
     window.check_all_drafts()
     window.queue_checked_articles()
-    sequence=[]
-    while True:
-        job=store.next_job()
-        if not job:
-            break
-        sequence.append(job["post_id"])
-        store.complete_job(job["id"],True,"受け付け")
+    sequence=[post['id'] for post in store.posts() if post['status']=='queued']
     assert sequence==ids[::-1]
 
 

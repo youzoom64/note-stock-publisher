@@ -136,11 +136,8 @@ class NativeNoteBrowser(NoteBrowser):
         self.store.merge_catalog([{'key':key,'title':saved['title'],
                                    'status':catalog.get('remote_status') or ('published' if post['status']=='published' else 'draft'),
                                    'owner':self.store.setting('account',''),'updated':catalog.get('remote_updated','')}],False)
-        self.page=self.new_page()
-        prepared=self.store.begin_native_edit(post['id'])
-        self.edit(prepared,automatic=True)
-        # Desired tags are applied to the captured, full native payload.
-        self.update_tags(post['id'],post['tags'],use_current=True)
+        # Draft persistence does not authorize loading publication settings or
+        # importing the body. That happens only when the user opens the article.
         return key
 
     def update_tags(self,pid,tags,*,use_current=False,expected_revision=None):

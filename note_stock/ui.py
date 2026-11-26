@@ -719,7 +719,7 @@ class MainWindow(QMainWindow):
         self.timer.start(1000)
         from .remote import RemoteController
         from .discord_ui import DiscordPanel
-        self.remote_controller=RemoteController(self,catalog_import_enabled=not offline)
+        self.remote_controller=RemoteController(self,catalog_import_enabled=False)
         if offline:
             self.remote_controller.timer.stop()
         self.discord_panel=DiscordPanel(self,connect_on_start=not offline)
@@ -1483,17 +1483,11 @@ class MainWindow(QMainWindow):
             due=self.when.dateTime().toSecsSinceEpoch() if status=='scheduled' else None
             if due is not None and due<=now_ts():
                 raise ValueError('投稿日時は現在より先に設定してください。')
-            if status=='scheduled' and not self.store.setting('account_verified',False):
-                raise ValueError('予約するには設定からnoteへのログインを確認してください。')
-            # An existing note is read before a reservation is committed. Saving
-            # PC settings must not mark an unverified note as already scheduled.
-            local_status=('draft' if not source['native_ready'] else
-                          (source['status'] if source['status'] in {'draft','queued','scheduled'} else 'draft')
-                          if status=='scheduled' and source['draft_key'] else status)
+            local_status=status
             local_due=source['due'] if local_status=='scheduled' else None
             baseline=self.current if self.current and self.current['id']==self.current_id else source
             edited_tags=tags_from_text(self.tags.text())
-            desired={'status':local_status,'due':local_due if status=='scheduled' and source['draft_key'] else due,
+            desired={'status':local_status,'due':due,
                      'image':self.image,'tags':edited_tags}
             if draft_content is not None and not source['draft_key']:
                 desired.update(title=title,body=body)
@@ -1503,18 +1497,17 @@ class MainWindow(QMainWindow):
             self.dirty = False
             self.current = self.store.get(self.current_id)
             self.load(self.current_id)
-            if self.store.setting('account_verified',False):
+            if not source['draft_key'] and self.store.setting('account_verified',False):
                 from .remote import submit
                 reserving=status=='scheduled'
                 action='schedule' if reserving and source['draft_key'] else 'save_note_draft'
                 submit(self.store,action,self.current_id,{'due':due,'queue':status=='queued'})
-                self.save_state.setText('本文・公開条件を確認して予約登録中' if reserving else 'note保存待ち')
+                self.save_state.setText('note保存待ち')
             else:
-                self.save_state.setText('PCに仮保存・note未保存')
+                self.save_state.setText('投稿設定を保存しました' if source['draft_key'] else 'PCに仮保存・note未保存')
             self.refresh()
             self.statusBar().showMessage(
-                '予約を受け付けました。本文・公開条件を自動確認し、予約登録の結果を表示します。'
-                if status=='scheduled' else 'PCに保存しました。note保存は処理結果で確認してください。',5000)
+                '投稿設定を保存しました。' if source['draft_key'] else 'PCに仮保存しました。',5000)
             if warning:
                 self.notify(warning, True)
             return True

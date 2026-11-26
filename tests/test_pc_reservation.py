@@ -37,7 +37,7 @@ def screen(tmp_path):
 
 
 @pytest.mark.parametrize('already_loaded',[False,True])
-def test_save_button_automatically_reads_and_reserves_without_draft_save(screen,monkeypatch,already_loaded):
+def test_save_button_registers_time_without_reading_or_saving_note(screen,monkeypatch,already_loaded):
     app,store,pid,window=screen
     snapshot={'title':'existing note','text':'remote content','document':{},'fingerprint':'same'}
     template={'account':'tester','payload':{'free_body':'<p>remote content</p>'}}
@@ -48,10 +48,10 @@ def test_save_button_automatically_reads_and_reserves_without_draft_save(screen,
     window.mode.setCurrentIndex(window.mode.findData('scheduled'))
     window.when.setDateTime(jst_qdate(planned))
     assert window.save_current()
-    assert store.get(pid)['status']=='draft'
+    assert store.get(pid)['status']=='scheduled'
     with store.connect() as c:
         row=c.execute("SELECT * FROM jobs WHERE state='waiting'").fetchone()
-    assert row['action']=='schedule'
+    assert row is None
     adapter=Mock()
     adapter.edit.side_effect=lambda post,automatic:store.capture_native(pid,template,snapshot,post)
     monkeypatch.setattr('note_stock.worker.NoteBrowser',lambda *args:adapter)
@@ -66,15 +66,14 @@ def test_save_button_automatically_reads_and_reserves_without_draft_save(screen,
     window.remote_controller.tick()
     app.processEvents()
     saved=store.get(pid)
-    assert saved['native_ready'] and saved['body']=='remote content'
+    assert bool(saved['native_ready'])==already_loaded
+    assert saved['body']==('remote content' if already_loaded else '')
     assert saved['status']=='scheduled' and saved['due']==planned
-    assert store.job(row['id'])['state']=='done'
+    assert store.next_job() is None
     adapter.save_draft.assert_not_called()
     adapter.publish.assert_not_called()
-    assert adapter.open.call_count==(0 if already_loaded else 1)
-    if not already_loaded:
-        assert not adapter.background
-    assert adapter.edit.call_count==(0 if already_loaded else 1)
+    adapter.open.assert_not_called()
+    adapter.edit.assert_not_called()
 
 
 def test_past_time_rejected_before_saving_or_queueing(screen):
@@ -98,13 +97,16 @@ def test_api_rejects_past_time_for_unread_article(tmp_path,action):
     assert store.next_job() is None
 
 
-def test_manual_reservation_preempts_catalog_import(tmp_path):
+def test_manual_reservation_completes_even_while_browser_is_busy(tmp_path):
     store=Store(tmp_path)
-    store.enqueue('schedule','test',{'due':now_ts()+60})
+    pid=store.create({'editor_kind':'legacy'})
+    job=store.enqueue('schedule',pid,{'due':now_ts()+60})
     worker=Mock(catalog_import=True)
     controller=SimpleNamespace(store=store,worker=worker,window=SimpleNamespace(busy=lambda:True,quitting=False))
     RemoteController.tick(controller)
-    worker.cancel.set.assert_called_once()
+    assert store.job(job)['state']=='done'
+    assert store.get(pid)['status']=='scheduled'
+    worker.cancel.set.assert_not_called()
 
 
 def test_scheduled_to_queue_gui_save_does_not_resubmit_or_erase_tags(screen,monkeypatch):

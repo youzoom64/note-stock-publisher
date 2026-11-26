@@ -26,7 +26,8 @@ def submit(store,action,pid=None,data=None,key=None,ui_session=None):
     data=dict(data or {})
     if action=='relogin_note': raise ValueError('遠隔再ログインは本人専用の復旧メニューから開始してください。')
     if action not in {'pause','resume','sync_articles'}:
-        if action!='cancel_schedule' and not store.setting('account_verified',False):
+        local=action in {'schedule','tags','cancel_schedule'} or (action=='save_note_draft' and data.get('queue'))
+        if not local and not store.setting('account_verified',False):
             raise ValueError('PCの設定からnoteへのログインを確認してください。')
         post=store.get(pid)
         if action in {'preview_article','refresh_article','tags','publish_note'} and not post['draft_key']:
@@ -59,7 +60,7 @@ def submit(store,action,pid=None,data=None,key=None,ui_session=None):
 
 
 class RemoteController(QObject):
-    def __init__(self,window,*,catalog_import_enabled=True):
+    def __init__(self,window,*,catalog_import_enabled=False):
         super().__init__(window)
         self.window=window
         self.store=window.store
@@ -135,6 +136,12 @@ class RemoteController(QObject):
                 self.finish('saved','予約を取り消しました。noteの記事は残っています。','')
                 return
             post=self.store.get(pid) if pid else None
+            if (action=='save_note_draft' and data.get('queue')) or action in {'schedule','tags'}:
+                with self.store.connect() as c:
+                    c.execute('BEGIN IMMEDIATE')
+                    self.store._apply_local_article_action(c,action,pid,data,now_ts())
+                self.finish('saved','投稿設定を保存しました。','')
+                return
             if data.get('queue_only'):
                 if post['status']!='queued':
                     raise ValueError('この記事はキューから外れています。')
@@ -196,22 +203,7 @@ class RemoteController(QObject):
             self.finish('failed',str(exc),'')
 
     def start_catalog_import(self,stamp):
-        if stamp<self.next_catalog_import_at:
-            return
-        self.next_catalog_import_at=stamp+2
-        post=self.store.next_catalog_import(self.window.current_id)
-        if not post:
-            return
-        self.background_sync=True
-        self.catalog_import_post_id=post['id']
-        self.worker=BrowserWorker(self.store,'prepare_publish_check',post,parent=self)
-        self.worker.headless_sync=True
-        self.worker.catalog_import=True
-        self.window.worker=self.worker
-        self.worker.outcome.connect(self.catalog_import_finished)
-        self.worker.finished.connect(self.worker_done)
-        self.worker.start()
-        self.window.refresh_controls()
+        return  # Body retrieval is an explicit article-open action only.
 
     def catalog_import_finished(self,status,message,url):
         post=self.worker.post

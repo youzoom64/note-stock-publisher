@@ -33,30 +33,54 @@ class BrowserWorker(QThread):
         self.interrupt_day=None
 
     def run(self):
+        if self.action=='save_note_draft' and self.items==['queue']:
+            try:
+                with self.store.connect() as c:
+                    c.execute('BEGIN IMMEDIATE')
+                    self.store._apply_local_article_action(c,'save_note_draft',self.post['id'],
+                        {'queue':True,'draft_queue':self.append_to_queue,'interrupt_day':self.interrupt_day},time.time())
+                self.outcome.emit('saved','キューへ追加しました。','')
+            except ValueError as exc:
+                self.outcome.emit('failed',str(exc),'')
+            return
         if self.action=='prepare_tags':
             try:
                 # Persist the explicit tag edit independently of subsequent note
                 # reads. The first remote capture must not win over this edit.
                 self.store.set_tags(self.post['id'],self.items,expected_revision=self.tags_revision)
                 self.post=self.store.get(self.post['id'])
+                self.outcome.emit('saved','投稿時のハッシュタグを保存しました。','')
+                return
             except ValueError as exc:
                 self.outcome.emit('failed',str(exc),'')
                 return
+        if self.action=='prepare_publish':
+            if not self.post['native_ready']:
+                self.outcome.emit('failed','先に記事を開いて本文・公開条件を確認してください。','')
+                return
+            with self.store.connect() as c:
+                c.execute('BEGIN IMMEDIATE')
+                current=c.execute('SELECT status,updated FROM posts WHERE id=?',(self.post['id'],)).fetchone()
+                if not current or current['status'] in {'posting','editing','unknown'} or current['updated']!=self.post['updated']:
+                    self.outcome.emit('failed','記事が変更されました。確認し直してください。','')
+                    return
+                c.execute("UPDATE posts SET status='posting',error='',updated=? WHERE id=?",(time.time(),self.post['id']))
+            self.post=self.store.get(self.post['id'])
+            self.action='publish'
         capture_catalog_draft = (self.action=='save_note_draft' and self.post
                                  and self.post['draft_key'] and self.post['editor_kind']=='native'
                                  and not self.post['native_ready'])
+        if capture_catalog_draft:
+            self.outcome.emit('saved','投稿設定を保存しました。','')
+            return
         if self.action=='prepare_schedule':
             try:
                 self.store.require_schedulable(self.post['id'])
-                if self.post['native_ready'] and self.post['status']!='review':
-                    # The selected note has already been captured. Reuse that
-                    # complete payload; publishing still verifies it against note.
-                    self.store.native_template(self.post['id'])
-                    self.store.set_schedule(self.post['id'],self.import_due)
-                    from datetime import datetime
-                    from .store import JST
-                    self.outcome.emit('saved','予約しました: '+datetime.fromtimestamp(self.import_due,JST).strftime('%Y-%m-%d %H:%M')+'（日本時間）','')
-                    return
+                with self.store.connect() as c:
+                    c.execute('BEGIN IMMEDIATE')
+                    self.store._apply_local_article_action(c,'schedule',self.post['id'],{'due':self.import_due},time.time())
+                self.outcome.emit('saved','投稿日時を登録しました。','')
+                return
             except ValueError as exc:
                 self.outcome.emit('failed',str(exc),'')
                 return

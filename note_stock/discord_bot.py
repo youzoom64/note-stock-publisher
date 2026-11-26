@@ -483,27 +483,7 @@ async def open_publish(i,client,post,listing=('all',0,'')):
         if post['status'] in NOTE_ACTION_BLOCKED:
             raise ValueError('別の処理を完了してから、もう一度開いてください。')
         if not post['native_ready'] or post['status']=='review':
-            expected=ui.capture(i)
-            await ui.defer(i,thinking=getattr(i,'message',None) is None)
-            check=submit(store,'refresh_article',pid,key=f'publish-preflight:{i.id}',ui_session=expected)
-            ui.rebase(i)
-            await show_view(i,'deferred',loading_text(client,'公開条件を確認しています。確認できたら投稿前の確認画面を表示します。'),
-                            view=PublishCheckView(client,pid,listing),allowed_mentions=discord.AllowedMentions.none())
-            deadline=asyncio.get_running_loop().time()+120
-            while ui.valid(i):
-                job=store.job(check)
-                if job['state']=='done':
-                    post=store.get(pid)
-                    if not post['native_ready']:
-                        raise ValueError('公開条件を確認できませんでした。')
-                    break
-                if job['state']=='failed':
-                    raise ValueError(job['result'].get('message') or '公開条件を確認できませんでした。')
-                if asyncio.get_running_loop().time()>=deadline:
-                    raise ValueError('公開条件の確認が終わりませんでした。PC側の状態を確認して、もう一度開いてください。')
-                await asyncio.sleep(.5)
-            if not ui.valid(i):
-                return
+            raise ValueError('先に記事をクリックして本文・公開条件を読み込み、内容を確認してください。')
         method='deferred' if ui.responded(i) else 'send_message'
         await show_view(i,method,article_text(store,post,publish_checked=bool(check))+'\n今すぐ投稿・更新しますか？',
                         view=Confirm(client,post,'publish_note',listing,publish_check=check),

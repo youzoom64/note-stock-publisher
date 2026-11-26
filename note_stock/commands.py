@@ -103,11 +103,11 @@ class Commands:
             if 'tags' in data: changes['tags']=tags
             if 'image' in data or data.get('image_file'): changes['image']=image
             if 'status' in data:
-                changes['status']='draft' if not old['native_ready'] and old['editor_kind']=='native' else desired
+                changes['status']='draft' if not old['draft_key'] and old['editor_kind']=='native' else desired
             if 'due' in data or desired!='scheduled': changes['due']=due if desired=='scheduled' else None
             self.store.save_fields(pid,changes,tags_revision=data.get('tags_revision',old['tags_revision']),expected=old)
             result = self.store.get(pid)
-            if self.store.setting('account_verified',False):
+            if not old['draft_key'] and self.store.setting('account_verified',False):
                 result['job_id']=submit(self.store,'save_note_draft',pid,{'due':due if desired=='scheduled' else None,'queue':desired=='queued'})
             result['note_saved']=False
         elif command == 'duplicate':

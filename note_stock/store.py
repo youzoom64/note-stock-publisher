@@ -366,8 +366,8 @@ class Store(RemoteStore):
             if old["status"] in LOCKED:
                 raise ValueError("投稿中・投稿済み・結果未確認の原稿は編集できません。複製、または公開結果の確認を行ってください。")
             if status!='draft':
-                if old['editor_kind']=='native' and not old['native_ready']:
-                    raise ValueError('noteで編集し、公開設定をアプリへ取り込んでから予約してください。')
+                if old['editor_kind']=='native' and not old['draft_key'] and not old['native_ready']:
+                    raise ValueError('先に記事をnoteへ下書き保存してください。')
                 if old['editor_kind']=='legacy' and (not title or not body.strip()):
                     raise ValueError('投稿するにはタイトルと本文が必要です。')
             if old['native_ready']:
@@ -482,8 +482,8 @@ class Store(RemoteStore):
         row=c.execute('SELECT status,editor_kind,native_ready,draft_key FROM posts WHERE id=?',(post_id,)).fetchone()
         if row['status']!='queued':
             raise ValueError('先にこの記事を定期投稿のキューに入れてください。')
-        if row['editor_kind']=='native' and not (row['native_ready'] and row['draft_key']):
-            raise ValueError('noteの本文と公開条件を確認してから差し込んでください。')
+        if row['editor_kind']=='native' and not row['draft_key']:
+            raise ValueError('先に記事をnoteへ下書き保存してください。')
         if c.execute('SELECT 1 FROM slots WHERE key=?',(when.isoformat(),)).fetchone():
             raise ValueError('この日の定期投稿枠はすでに使われています。')
         previous=c.execute('SELECT day FROM recurring_overrides WHERE post_id=?',(post_id,)).fetchone()

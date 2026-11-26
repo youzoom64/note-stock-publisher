@@ -44,18 +44,13 @@ def test_save_records_key_before_native_save_leaves_editor_and_reopens_to_verify
         adapter.page=context.new_page()
         adapter.check_account=lambda:'tester'
         def capture(post,automatic=False):
-            assert automatic
-            adapter.page.goto('https://editor.note.com/notes/'+key+'/edit/')
-            snapshot=content_snapshot(adapter.page)
-            store.capture_native(pid,{'account':'tester','key':key,'payload':{'name':snapshot['title'],'free_body':snapshot['html'],'status':'published'}},
-                                 snapshot,{**post,'_preserve_app_tags':automatic})
-            adapter.page.close()
+            pytest.fail('下書き保存で本文・公開条件を取得してはいけません')
         monkeypatch.setattr(adapter,'edit',capture)
         assert adapter.save_draft(store.get(pid))==key
         saved=store.get(pid)
-        assert saved['native_ready'] and saved['body']=='本文の保存確認'
+        assert not saved['native_ready'] and saved['body']=='本文の保存確認'
         assert saved['tags']==['日記']
-        assert store.native_template(pid)['payload']['hashtags']==['#日記']
+        assert state['saved']
         # Saving an existing scheduled/queued draft must not turn a missing
         # catalog timestamp into an external-change/review state.
         store.merge_catalog([{'key':key,'title':'保存テスト','status':'draft','owner':'tester','updated':'known-revision'}])

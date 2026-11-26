@@ -97,7 +97,39 @@ class RemoteStore:
                 if post: details['_history_title']=post['title']
             c.execute('INSERT INTO jobs(id,request_key,action,post_id,data,created,updated) VALUES(?,?,?,?,?,?,?)',
                       (jid,key,action,post_id,json.dumps(details,ensure_ascii=False),stamp,stamp))
+            if (action=='save_note_draft' and details.get('queue')) or action in {'schedule','tags'}:
+                self._apply_local_article_action(c,action,post_id,details,stamp)
+                result={'ok':True,'message':('投稿時のハッシュタグを保存しました。' if action=='tags' else
+                        '投稿日時を登録しました。' if action=='schedule' else 'キューへ追加しました。'),'url':''}
+                c.execute("UPDATE jobs SET state='done',result=? WHERE id=?",(json.dumps(result,ensure_ascii=False),jid))
+                if details.get('queue_batch'):
+                    self._complete_queue_batch(c,details['queue_batch'])
+                else:
+                    c.execute('INSERT INTO notifications(id,body) VALUES(?,?)',('job:'+jid,json.dumps(result,ensure_ascii=False)))
         return jid
+
+    def _apply_local_article_action(self,c,action,pid,data,stamp):
+        row=c.execute('SELECT * FROM posts WHERE id=?',(pid,)).fetchone()
+        if not row or row['status'] in {'posting','editing','unknown'}:
+            raise ValueError('処理中または結果未確認です。')
+        if action=='tags':
+            self._write_tags(c,pid,data['tags'],data['tags_revision'])
+            return
+        self.require_schedulable(pid,connection=c)
+        if row['editor_kind']=='native' and not row['draft_key']:
+            raise ValueError('先に記事をnoteへ下書き保存してください。')
+        if action=='schedule':
+            import math
+            due=data.get('due')
+            if type(due) not in (int,float) or not math.isfinite(due) or due<=stamp:
+                raise ValueError('未来の投稿日時を指定してください。')
+            c.execute("UPDATE posts SET status='scheduled',due=?,error='',updated=? WHERE id=?",(data['due'],stamp,pid))
+            return
+        c.execute("UPDATE posts SET status='queued',due=NULL,error='',updated=? WHERE id=?",(stamp,pid))
+        if data.get('draft_queue') and row['status']!='queued':
+            c.execute('UPDATE posts SET position=(SELECT COALESCE(MAX(position),0)+1 FROM posts) WHERE id=?',(pid,))
+        if data.get('interrupt_day'):
+            self._set_recurring_override(c,pid,data['interrupt_day'],stamp)
 
     def operation_history(self,page=0,size=5):
         with self.connect() as c:

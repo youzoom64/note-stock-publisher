@@ -14,8 +14,11 @@ def queued_batch(store, count=3):
     batch=store.begin_queue_batch()
     jobs=[]
     for index in range(count):
-        pid=store.create({"title":f"記事 {index}"})
+        pid=store.create({"editor_kind":"legacy","title":f"記事 {index}"})
         jobs.append(store.enqueue("save_note_draft",pid,{"queue":True,"draft_queue":True,"queue_batch":batch}))
+        # Exercise notification aggregation with simulated unfinished results.
+        with store.connect() as c:
+            c.execute("UPDATE jobs SET state='waiting' WHERE id=?",(jobs[-1],))
     store.seal_queue_batch(batch,[])
     return jobs
 
@@ -68,8 +71,11 @@ def test_legacy_pending_bulk_jobs_are_grouped_on_restart(tmp_path):
     store=Store(tmp_path)
     jobs=[]
     for index in range(2):
-        pid=store.create({"title":str(index)})
+        pid=store.create({"editor_kind":"legacy","title":str(index)})
         jobs.append(store.enqueue("save_note_draft",pid,{"queue":True,"draft_queue":True}))
+        with store.connect() as c:
+            c.execute("UPDATE jobs SET state='waiting' WHERE id=?",(jobs[-1],))
+            c.execute('DELETE FROM notifications WHERE id=?',('job:'+jobs[-1],))
     store.complete_job(jobs[0],True,"追加")
     store.recover_jobs()
     assert not store.pending_notifications()
