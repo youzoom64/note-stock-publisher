@@ -495,7 +495,6 @@ class SettingsDialog(QDialog):
         layout.addWidget(self.cursor_help_enabled)
         layout.addWidget(self.autostart)
         layout.addWidget(self.diagnostics)
-        layout.addWidget(button('拡張機能：Discord内で再ログイン',self.remote_extension))
         info = label("原稿・画像・ログイン状態は、このアプリのdataフォルダー内に保存します。\n終了・スリープ中は投稿しません。期限を過ぎた予約は再予約が必要です。", "muted")
         info.setWordWrap(True)
         layout.addWidget(info)

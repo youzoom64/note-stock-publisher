@@ -6,7 +6,7 @@ from PySide6.QtCore import QDate, QEvent, QPointF, QRectF, Qt, QTime, Signal
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import (
     QButtonGroup, QDialog, QDialogButtonBox, QHBoxLayout, QLabel, QPushButton,
-    QTimeEdit, QVBoxLayout, QWidget,
+    QTimeEdit, QToolButton, QVBoxLayout, QWidget,
 )
 from .calendar_notes import DateNotes
 
@@ -223,34 +223,41 @@ class PostingTimeDialog(QDialog):
         super().accept()
 
 
-class ClockTimeEdit(QTimeEdit):
+class ClockTimeEdit(QWidget):
+    timeChanged=Signal(QTime)
+
     def __init__(self, time, parent=None):
-        super().__init__(time, parent)
+        super().__init__(parent)
         self.clock_open = False
-        self.setToolTip('クリックすると時計で投稿時刻を選べます。')
-        self.lineEdit().installEventFilter(self)
+        self.editor=QTimeEdit(time,self)
+        self.editor.setToolTip('数字を直接入力するか、上下の矢印で時刻を変更できます。')
+        self.editor.timeChanged.connect(self.timeChanged.emit)
+        self.clock_button=QToolButton(self)
+        self.clock_button.setText('時計')
+        self.clock_button.setAccessibleName('時計で時刻を選ぶ')
+        self.clock_button.setToolTip('時計を開いて時刻を選びます。')
+        self.clock_button.clicked.connect(self.open_clock)
+        layout=QHBoxLayout(self)
+        layout.setContentsMargins(0,0,0,0)
+        layout.setSpacing(6)
+        layout.addWidget(self.editor,1)
+        layout.addWidget(self.clock_button)
+        self.setFocusProxy(self.editor)
 
-    def eventFilter(self, watched, event):
-        if (watched is self.lineEdit() and event.type() == QEvent.Type.MouseButtonPress
-                and event.button() == Qt.MouseButton.LeftButton):
-            event.accept()
-            self.open_clock()
-            return True
-        return super().eventFilter(watched, event)
+    def time(self):
+        return self.editor.time()
 
-    def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            event.accept()
-            self.open_clock()
-        else:
-            super().mousePressEvent(event)
+    def setTime(self,time):
+        self.editor.setTime(time)
 
-    def keyPressEvent(self, event):
-        if event.key() in (Qt.Key.Key_Space, Qt.Key.Key_Return, Qt.Key.Key_Enter):
-            event.accept()
-            self.open_clock()
-        else:
-            super().keyPressEvent(event)
+    def setDisplayFormat(self,format):
+        self.editor.setDisplayFormat(format)
+
+    def setKeyboardTracking(self,enabled):
+        self.editor.setKeyboardTracking(enabled)
+
+    def interpretText(self):
+        self.editor.interpretText()
 
     def open_clock(self):
         if self.clock_open:
