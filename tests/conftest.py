@@ -15,7 +15,7 @@ os.environ.setdefault('PLAYWRIGHT_BROWSERS_PATH',str(ROOT/'artifacts'/'test-brow
 
 @pytest.fixture(scope="session", autouse=True)
 def qt_application():
-    from PySide6.QtWidgets import QApplication
+    from note_stock.qt import QApplication
     from note_stock.windows_accessibility import create_application
     application = QApplication.instance() or create_application([])
     yield application

@@ -142,7 +142,7 @@ def test_account_validation():
 
 
 def test_cover_upload_uses_image_chooser(browser_site, tmp_path):
-    from PySide6.QtGui import QImage, QColor
+    from note_stock.qt import QImage, QColor
     adapter, store, state = browser_site
     image = QImage(128, 67, QImage.Format.Format_RGB32)
     image.fill(QColor('#16845e'))

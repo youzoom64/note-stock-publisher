@@ -13,8 +13,9 @@ def test_first_visible_window_initializes_uia_without_com_exception(tmp_path):
 import ctypes
 import faulthandler
 import sys
-from PySide6.QtCore import QProcess, QTimer
-from PySide6.QtWidgets import QDialog, QVBoxLayout, QPushButton
+sys.path.insert(0,sys.argv[1])
+from note_stock.qt import QProcess, QTimer
+from note_stock.qt import QDialog, QVBoxLayout, QPushButton
 from note_stock.windows_accessibility import create_application
 
 faulthandler.enable()
@@ -64,7 +65,7 @@ print("UIA query succeeded; COM exception count 0")
     env = os.environ.copy()
     env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
     result = subprocess.run(
-        [sys.executable, "-B", str(script)], env=env,
+        [sys.executable, "-B", str(script),str(Path(__file__).resolve().parents[1])], env=env,
         capture_output=True, text=True, timeout=25,
     )
     assert result.returncode == 0, result.stdout + result.stderr

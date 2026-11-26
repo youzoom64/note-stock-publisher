@@ -1,5 +1,5 @@
 import pytest
-from PySide6.QtWidgets import QApplication,QDialog
+from note_stock.qt import QApplication,QDialog
 from note_stock.discord_commands import command_names
 from note_stock.discord_ui import DiscordCommandDialog
 from note_stock.store import Store

@@ -15,6 +15,7 @@ def prepare_environment(data):
         os.environ[key] = str(cache)
     os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
     os.environ['PLAYWRIGHT_BROWSERS_PATH']=str(Path(data)/'browsers')
+    os.environ['PLAYWRIGHT_NODEJS_PATH']=str(app_folder()/'runtime32'/'node-v22.23.5-win-x86'/'node.exe')
 
 
 def set_autostart(enabled):
@@ -27,10 +28,10 @@ def set_autostart(enabled):
                 command = f'"{sys.executable}"'
             else:
                 command = f'"{sys.executable}" "{app_folder() / "main.py"}"'
-            winreg.SetValueEx(key, "NoteStockPublisher", 0, winreg.REG_SZ, command)
+            winreg.SetValueEx(key, "NoteStockPublisher32", 0, winreg.REG_SZ, command)
         else:
             try:
-                winreg.DeleteValue(key, "NoteStockPublisher")
+                winreg.DeleteValue(key, "NoteStockPublisher32")
             except FileNotFoundError:
                 pass
 
@@ -41,6 +42,6 @@ def autostart_enabled():
     import winreg
     try:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run") as key:
-            return bool(winreg.QueryValueEx(key, "NoteStockPublisher")[0])
+            return bool(winreg.QueryValueEx(key, "NoteStockPublisher32")[0])
     except FileNotFoundError:
         return False

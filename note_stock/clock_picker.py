@@ -2,9 +2,9 @@
 
 from math import atan2, cos, floor, hypot, pi, sin
 
-from PySide6.QtCore import QDate, QEvent, QPoint, QPointF, QRectF, Qt, QTime, QTimer, Signal
-from PySide6.QtGui import QColor, QPainter, QPen
-from PySide6.QtWidgets import (
+from .qt import QDate, QEvent, QPoint, QPointF, QRectF, Qt, QTime, QTimer, Signal
+from .qt import QColor, QPainter, QPen
+from .qt import (
     QAbstractItemView, QApplication, QButtonGroup, QDialog, QDialogButtonBox,
     QFrame, QHBoxLayout, QLabel, QListWidget, QPushButton, QSizePolicy,
     QTimeEdit, QToolButton, QVBoxLayout, QWidget,

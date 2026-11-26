@@ -22,9 +22,9 @@ def reservation_counts(posts,year,month):
 
 
 def calendar_png(year,month,selected,counts):
-    from PySide6.QtCore import QByteArray,QBuffer,QIODevice,QRectF,Qt
-    from PySide6.QtGui import QImage,QPainter,QColor,QFont,QFontMetrics
-    from PySide6.QtWidgets import QApplication
+    from .qt import QByteArray,QBuffer,QIODevice,QRectF,Qt
+    from .qt import QImage,QPainter,QColor,QFont,QFontMetrics
+    from .qt import QApplication
     global _image_app
     if QApplication.instance() is None:_image_app=QApplication([])
     weeks=calendar.Calendar(firstweekday=6).monthdayscalendar(year,month)

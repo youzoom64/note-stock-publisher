@@ -1,8 +1,8 @@
 from types import SimpleNamespace
 
 import pytest
-from PySide6.QtCore import Qt
-from PySide6.QtTest import QTest
+from note_stock.qt import Qt
+from note_stock.qt import QTest
 
 from note_stock.store import Store
 from note_stock.ui import MainWindow,STYLE

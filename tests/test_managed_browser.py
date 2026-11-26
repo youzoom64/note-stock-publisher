@@ -16,18 +16,21 @@ def test_selection_falls_back_and_explicit_choice_does_not(tmp_path,monkeypatch)
     pw=SimpleNamespace(chromium=SimpleNamespace(executable_path=str(bundled)))
     monkeypatch.setattr(managed,'installed_browser',lambda kind:str(edge) if kind=='edge' else None)
     assert managed.select_browser(pw)==('edge',str(edge))
-    assert managed.select_browser(pw,'chromium')==('chromium',str(bundled))
+    with pytest.raises(RuntimeError):
+        managed.select_browser(pw,'chromium')
     with pytest.raises(RuntimeError):
         managed.select_browser(pw,'chrome')
     with pytest.raises(ValueError):
         managed.select_browser(pw,'invalid')
+    monkeypatch.setattr(managed,'installed_browser',lambda kind:str(bundled) if kind=='chrome' else None)
+    assert managed.select_browser(pw,'chromium')==('chromium',str(bundled))
 
 
 def test_reconnect_keeps_same_owned_browser_and_shutdown_leaves_other_browser(tmp_path,monkeypatch):
     monkeypatch.setenv('NOTE_STOCK_BROWSER_EXE',str(tmp_path/'not-a-browser.exe'))
     monkeypatch.setenv('NOTE_STOCK_TEST_CDP_FILE',str(tmp_path/'not-a-connection.json'))
     with sync_playwright() as pw:
-        unrelated=pw.chromium.launch(headless=True)
+        unrelated=pw.chromium.launch(headless=False,executable_path=managed.installed_browser('chrome'))
         unrelated_page=unrelated.new_page()
         unrelated_page.set_content('<title>Other browser</title>')
         try:
@@ -61,4 +64,7 @@ def test_developer_environment_cannot_redirect_browser_selection(tmp_path,monkey
     browser=tmp_path/'chromium.exe'
     browser.touch()
     pw=SimpleNamespace(chromium=SimpleNamespace(executable_path=str(browser)))
-    assert managed.select_browser(pw,'chromium')==('chromium',str(browser))
+    private=tmp_path/'private-x86.exe'
+    private.touch()
+    monkeypatch.setattr(managed,'installed_browser',lambda kind:str(private) if kind=='chrome' else None)
+    assert managed.select_browser(pw,'chromium')==('chromium',str(private))

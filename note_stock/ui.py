@@ -4,9 +4,9 @@ from datetime import datetime, timedelta
 from html import escape
 import json
 
-from PySide6.QtCore import Qt, QDate, QDateTime, QEvent, QTime, QTimeZone, QTimer, QSize, QUrl, QProcess, Signal
-from PySide6.QtGui import QColor, QDesktopServices, QIcon, QPainter, QPalette, QPixmap, QTextCharFormat, QAction, QKeySequence, QDrag, QCursor
-from PySide6.QtWidgets import (
+from .qt import Qt, QDate, QDateTime, QEvent, QTime, QTimeZone, QTimer, QSize, QUrl, QProcess, Signal
+from .qt import QColor, QDesktopServices, QIcon, QPainter, QPalette, QPixmap, QTextCharFormat, QAction, QKeySequence, QDrag, QCursor
+from .qt import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QLineEdit, QPlainTextEdit, QComboBox, QListWidget, QListWidgetItem, QSplitter,
     QFormLayout, QCalendarWidget, QDateEdit, QDateTimeEdit, QDialog, QDialogButtonBox, QCheckBox,
@@ -680,7 +680,7 @@ class MainWindow(QMainWindow):
         self.pending_drafts=None
         self.pending_edit_id=None
         self.revision = 0
-        self.setWindowTitle("noteストック — 投稿管理")
+        self.setWindowTitle("noteストック — 投稿管理（32bit版）")
         self.setWindowIcon(icon())
         screen=QApplication.primaryScreen().availableGeometry()
         saved_size=store.setting("window_size", [1260, 900])

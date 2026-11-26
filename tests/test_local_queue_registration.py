@@ -2,7 +2,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
-from PySide6.QtCore import Qt
+from note_stock.qt import Qt
 
 from note_stock.remote import submit
 from note_stock.store import Store,now_ts

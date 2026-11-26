@@ -1,6 +1,6 @@
-from PySide6.QtCore import QEasingCurve, Qt, QVariantAnimation
-from PySide6.QtGui import QColor
-from PySide6.QtWidgets import QGraphicsDropShadowEffect, QLabel, QSizePolicy, QStatusBar, QVBoxLayout, QWidget
+from .qt import QEasingCurve, Qt, QVariantAnimation
+from .qt import QColor
+from .qt import QGraphicsDropShadowEffect, QLabel, QSizePolicy, QStatusBar, QVBoxLayout, QWidget
 
 
 class ActionStatusBar(QStatusBar):

@@ -7,9 +7,9 @@ import json
 import re
 from urllib.parse import quote
 
-from PySide6.QtCore import QObject, Qt, QTimer, QUrl, QUrlQuery, Signal
-from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
-from PySide6.QtWidgets import QApplication, QLabel
+from .qt import QObject, Qt, QTimer, QUrl, QUrlQuery, Signal
+from .qt import QNetworkAccessManager, QNetworkReply, QNetworkRequest
+from .qt import QApplication, QLabel
 
 
 class DateArticle(HTMLParser):

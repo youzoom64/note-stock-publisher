@@ -3,7 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
-from PySide6.QtCore import QPoint, QPointF, Qt
+from note_stock.qt import QPoint, QPointF, Qt
 
 from note_stock.store import Store, JST
 from note_stock.ui import MainWindow

@@ -2,7 +2,7 @@ from contextlib import ExitStack
 import threading
 import time
 
-from PySide6.QtCore import QThread, Signal
+from .qt import QThread, Signal
 
 from .diagnostics import Diagnostics
 from .publisher import LoginRequired

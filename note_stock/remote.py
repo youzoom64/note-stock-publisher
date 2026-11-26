@@ -1,6 +1,6 @@
 """Qt-thread dispatcher shared by Discord, GUI and CLI job submissions."""
 import json
-from PySide6.QtCore import QObject, QTimer
+from .qt import QObject, QTimer
 from .store import DEFAULT_ARTICLE_SYNC_MINUTES, MIN_ARTICLE_SYNC_MINUTES, now_ts, tags_from_text
 from .worker import BrowserWorker
 

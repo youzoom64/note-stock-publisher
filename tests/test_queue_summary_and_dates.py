@@ -2,7 +2,7 @@ import asyncio
 from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
-from PySide6.QtCore import Qt
+from note_stock.qt import Qt
 
 from note_stock.discord_bot import NoteClient, Articles, article_text
 from note_stock.store import Store, JST

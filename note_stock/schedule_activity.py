@@ -24,7 +24,7 @@ def service(store):
 class ScheduleActivity:
     def __init__(self,store):
         self.store=store
-        self.auth_lock=asyncio.Lock()
+        self._auth_lock=None
         self.attempts=[]
         self.probe_id=secrets.token_urlsafe(32)
         with store.connect() as c:
@@ -79,6 +79,11 @@ class ScheduleActivity:
             recovery=bool(ticket.get('expires',0)>now_ts() and str(state.get('instance_id'))==request.query.get('instance'))
             return web.json_response({'purpose':'relogin' if recovery else 'pending'})
         return web.json_response({'purpose':'schedule'})
+
+    @property
+    def auth_lock(self):
+        if self._auth_lock is None:self._auth_lock=asyncio.Lock()
+        return self._auth_lock
 
     async def auth(self,request):
         async with self.auth_lock:

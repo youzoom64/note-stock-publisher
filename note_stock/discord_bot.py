@@ -762,7 +762,8 @@ class NoteClient(discord.Client):
     def __init__(self,store):
         super().__init__(intents=discord.Intents(guilds=True,guild_messages=True),allowed_mentions=discord.AllowedMentions.none())
         self.store=store
-        self.recovery_ui_lock=asyncio.Lock()
+        # Python 3.9 binds a Lock to the current loop at construction time.
+        self.recovery_ui_lock=None
         self.tree=app_commands.CommandTree(self)
         names=command_names(store.setting('discord_commands',{}))
         @self.tree.command(name=names['relogin'],description='Discord内の専用画面でnoteへ再ログイン')
@@ -842,6 +843,8 @@ class NoteClient(discord.Client):
         private=bool(getattr(getattr(source,'flags',None),'ephemeral',False))
         flow(self).capture(i)
         await flow(self).defer(i,thinking=not private)
+        if self.recovery_ui_lock is None:
+            self.recovery_ui_lock=asyncio.Lock()
         async with self.recovery_ui_lock:
             try:
                 from .relogin import manager

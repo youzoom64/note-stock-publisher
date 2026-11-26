@@ -2,8 +2,8 @@
 import ctypes
 import sys
 
-from PySide6.QtCore import QEvent, QObject
-from PySide6.QtWidgets import QApplication, QWidget
+from .qt import QEvent, QObject
+from .qt import QApplication, QWidget
 
 
 class _AccessibilityStartup(QObject):

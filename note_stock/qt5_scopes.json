@@ -1,0 +1,263 @@
+{
+  "QAbstractItemView": {
+    "ScrollMode": [
+      "ScrollPerPixel"
+    ],
+    "ScrollHint": [
+      "PositionAtCenter"
+    ],
+    "DragDropMode": [
+      "InternalMove",
+      "NoDragDrop"
+    ]
+  },
+  "QCalendarWidget": {
+    "VerticalHeaderFormat": [
+      "NoVerticalHeader"
+    ]
+  },
+  "QDialog": {
+    "DialogCode": [
+      "Accepted"
+    ]
+  },
+  "QDialogButtonBox": {
+    "StandardButton": [
+      "Cancel",
+      "Close",
+      "Ok",
+      "Save"
+    ],
+    "ButtonRole": [
+      "ActionRole"
+    ]
+  },
+  "QEasingCurve": {
+    "Type": [
+      "InOutSine"
+    ]
+  },
+  "QEvent": {
+    "Type": [
+      "KeyPress",
+      "MouseButtonPress",
+      "MouseMove",
+      "Show",
+      "ToolTip",
+      "UngrabMouse",
+      "WindowDeactivate"
+    ]
+  },
+  "QFrame": {
+    "Shape": [
+      "NoFrame"
+    ]
+  },
+  "QHeaderView": {
+    "ResizeMode": [
+      "Stretch"
+    ]
+  },
+  "QIODevice": {
+    "OpenModeFlag": [
+      "WriteOnly"
+    ]
+  },
+  "QImage": {
+    "Format": [
+      "Format_RGB32"
+    ]
+  },
+  "QKeySequence": {
+    "StandardKey": [
+      "Save"
+    ]
+  },
+  "QLineEdit": {
+    "EchoMode": [
+      "Password"
+    ]
+  },
+  "QLocalServer": {
+    "SocketOption": [
+      "UserAccessOption"
+    ]
+  },
+  "QMessageBox": {
+    "ButtonRole": [
+      "AcceptRole",
+      "ActionRole",
+      "DestructiveRole",
+      "RejectRole"
+    ],
+    "StandardButton": [
+      "Cancel",
+      "Yes"
+    ]
+  },
+  "QNetworkReply": {
+    "NetworkError": [
+      "NoError"
+    ]
+  },
+  "QPainter": {
+    "RenderHint": [
+      "Antialiasing"
+    ]
+  },
+  "QPalette": {
+    "ColorRole": [
+      "AlternateBase",
+      "Base",
+      "Button",
+      "ButtonText",
+      "Highlight",
+      "HighlightedText",
+      "Text",
+      "Window",
+      "WindowText"
+    ],
+    "ColorGroup": [
+      "Disabled"
+    ]
+  },
+  "QProcess": {
+    "ProcessError": [
+      "FailedToStart"
+    ]
+  },
+  "QSizePolicy": {
+    "Policy": [
+      "Fixed",
+      "Ignored",
+      "Preferred"
+    ]
+  },
+  "QStyle": {
+    "StateFlag": [
+      "State_Off",
+      "State_On",
+      "State_Selected"
+    ],
+    "SubElement": [
+      "SE_ItemViewItemCheckIndicator"
+    ],
+    "PrimitiveElement": [
+      "PE_IndicatorItemViewItemCheck"
+    ]
+  },
+  "QStyleOptionViewItem": {
+    "ViewItemFeature": [
+      "HasCheckIndicator"
+    ]
+  },
+  "QSystemTrayIcon": {
+    "ActivationReason": [
+      "DoubleClick",
+      "Trigger"
+    ]
+  },
+  "QTextDocument": {
+    "ResourceType": [
+      "ImageResource"
+    ]
+  },
+  "QTimeEdit": {
+    "ButtonSymbols": [
+      "NoButtons"
+    ]
+  },
+  "Qt": {
+    "TextFormat": [
+      "PlainText",
+      "RichText"
+    ],
+    "AlignmentFlag": [
+      "AlignCenter",
+      "AlignHCenter",
+      "AlignLeft",
+      "AlignTop",
+      "AlignVCenter"
+    ],
+    "PenStyle": [
+      "NoPen"
+    ],
+    "PenCapStyle": [
+      "RoundCap"
+    ],
+    "MouseButton": [
+      "LeftButton"
+    ],
+    "WindowType": [
+      "FramelessWindowHint",
+      "Popup",
+      "ToolTip",
+      "WindowDoesNotAcceptFocus",
+      "WindowStaysOnTopHint",
+      "WindowTransparentForInput"
+    ],
+    "WidgetAttribute": [
+      "WA_NoMouseReplay",
+      "WA_ShowWithoutActivating",
+      "WA_TranslucentBackground",
+      "WA_TransparentForMouseEvents"
+    ],
+    "ScrollBarPolicy": [
+      "ScrollBarAlwaysOff",
+      "ScrollBarAlwaysOn"
+    ],
+    "FocusReason": [
+      "PopupFocusReason"
+    ],
+    "Key": [
+      "Key_Enter",
+      "Key_Escape",
+      "Key_F4",
+      "Key_Left",
+      "Key_Return",
+      "Key_Right"
+    ],
+    "ItemDataRole": [
+      "BackgroundRole",
+      "CheckStateRole",
+      "DisplayRole",
+      "ToolTipRole",
+      "UserRole"
+    ],
+    "ItemFlag": [
+      "ItemIsDragEnabled",
+      "ItemIsEditable",
+      "ItemIsUserCheckable"
+    ],
+    "CheckState": [
+      "Checked",
+      "Unchecked"
+    ],
+    "TextElideMode": [
+      "ElideRight"
+    ],
+    "DropAction": [
+      "MoveAction"
+    ],
+    "ArrowType": [
+      "NoArrow"
+    ],
+    "DayOfWeek": [
+      "Saturday",
+      "Sunday"
+    ],
+    "Corner": [
+      "TopRightCorner"
+    ],
+    "Orientation": [
+      "Horizontal"
+    ],
+    "TextInteractionFlag": [
+      "TextBrowserInteraction",
+      "TextSelectableByMouse"
+    ],
+    "ConnectionType": [
+      "QueuedConnection"
+    ]
+  }
+}

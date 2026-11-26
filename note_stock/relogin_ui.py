@@ -2,9 +2,9 @@
 import subprocess
 import sys
 from pathlib import Path
-from PySide6.QtCore import QThread,Signal,QUrl
-from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import QDialog,QVBoxLayout,QFormLayout,QLabel,QLineEdit,QCheckBox,QPushButton,QFileDialog,QSpinBox
+from .qt import QThread,Signal,QUrl
+from .qt import QDesktopServices
+from .qt import QDialog,QVBoxLayout,QFormLayout,QLabel,QLineEdit,QCheckBox,QPushButton,QFileDialog,QSpinBox
 from .relogin import manager,public_url
 
 

@@ -314,7 +314,7 @@ class Store(RemoteStore):
                          append_to_queue=append_to_queue,interrupt_day=interrupt_day)
 
     def import_image(self, source):
-        from PySide6.QtGui import QImageReader
+        from .qt import QImageReader
         source = Path(source)
         reader = QImageReader(str(source))
         if not reader.canRead() or reader.read().isNull():

@@ -5,7 +5,7 @@ import time
 import json
 from urllib.request import Request,urlopen
 from urllib.error import HTTPError,URLError
-from PySide6.QtCore import QThread, Signal
+from .qt import QThread, Signal
 from .secrets import protect,unprotect
 from .diagnostics import Diagnostics
 

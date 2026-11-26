@@ -13,7 +13,7 @@ def test_reservation_dates_use_japan_time_and_ignore_published_and_cancelled_pos
 
 
 def test_calendar_png_has_seven_fixed_columns_when_scaled_to_phone_width():
-    from PySide6.QtGui import QImage
+    from note_stock.qt import QImage
     raw=calendar_png(2026,11,26,{26:2,28:1})
     image=QImage.fromData(raw)
     assert image.width()==560 and image.height()>300

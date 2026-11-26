@@ -3,10 +3,10 @@ from datetime import datetime, timedelta
 from unittest.mock import Mock
 
 import pytest
-from PySide6.QtCore import QTimer, QTime, Qt
-from PySide6.QtGui import QImage
-from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QStyle, QStyleOptionViewItem
+from note_stock.qt import QTimer, QTime, Qt
+from note_stock.qt import QImage
+from note_stock.qt import QTest
+from note_stock.qt import QApplication, QStyle, QStyleOptionViewItem
 
 from note_stock.clock_picker import TimePickerPopup
 from note_stock.remote import submit
@@ -173,7 +173,7 @@ def test_queue_cancellation_returns_selected_items_to_drafts(screen):
 
 
 def test_tray_close_keeps_processing_and_icon_opens_window(screen,qt_application):
-    from PySide6.QtWidgets import QSystemTrayIcon
+    from note_stock.qt import QSystemTrayIcon
     store,window,_,_=screen
     window.enable_tray()
     window.showMinimized()

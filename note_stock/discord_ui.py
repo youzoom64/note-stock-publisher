@@ -3,9 +3,9 @@ import re
 import sqlite3
 from pathlib import Path
 
-from PySide6.QtCore import QTimer,Qt,QUrl
-from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import (QWidget,QVBoxLayout,QHBoxLayout,QLabel,QPushButton,QComboBox,
+from .qt import QTimer,Qt,QUrl
+from .qt import QDesktopServices
+from .qt import (QWidget,QVBoxLayout,QHBoxLayout,QLabel,QPushButton,QComboBox,
     QDialog,QRadioButton,QButtonGroup,QLineEdit,QStackedWidget,QCheckBox,QTableWidget,QTableWidgetItem,QHeaderView,QMessageBox,
     QTextBrowser)
 from .discord_commands import COMMANDS,command_names

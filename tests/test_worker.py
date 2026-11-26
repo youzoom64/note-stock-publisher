@@ -50,7 +50,7 @@ def test_worker_persists_article_failure_and_pauses_only_for_login(tmp_path, mon
 
 
 def test_two_instances_cannot_lock_same_store(tmp_path):
-    from PySide6.QtCore import QLockFile
+    from note_stock.qt import QLockFile
     first, second = QLockFile(str(tmp_path/'instance.lock')), QLockFile(str(tmp_path/'instance.lock'))
     assert first.tryLock(0)
     assert not second.tryLock(0)

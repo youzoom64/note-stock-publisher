@@ -6,7 +6,7 @@ from typing import Any, Iterator
 
 
 def _import_qt():
-    for binding in ("PySide6",):
+    for binding in ("PySide6", "PySide2"):
         try:
             if binding == "PyQt6":
                 from PyQt6.QtCore import QObject, QTimer

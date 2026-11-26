@@ -1,7 +1,7 @@
-from PySide6.QtCore import QByteArray, QUrl
-from PySide6.QtGui import QImage, QTextDocument
-from PySide6.QtNetwork import QNetworkAccessManager, QNetworkRequest
-from PySide6.QtWidgets import QTextBrowser
+from .qt import QByteArray, QUrl
+from .qt import QImage, QTextDocument
+from .qt import QNetworkAccessManager, QNetworkRequest
+from .qt import QTextBrowser
 
 
 class RichPreview(QTextBrowser):

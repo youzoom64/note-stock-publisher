@@ -14,6 +14,7 @@ entries=[ROOT/name for name in ('main.py','requirements.txt','setup.ps1','start.
 entries.extend(path for path in (ROOT/'guide').rglob('*') if path.is_file())
 entries.extend(path for path in (ROOT/'note_stock').rglob('*.py') if '__pycache__' not in path.parts)
 entries.append(ROOT/'note_stock'/'discord-manual-setup.html')
+entries.append(ROOT/'note_stock'/'qt5_scopes.json')
 entries.extend(sorted((ROOT/'note_stock'/'calendar_data').glob('*.*')))
 entries.extend(sorted((ROOT/'note_stock'/'sounds').glob('*.wav')))
 entries.append(ROOT/'scripts'/'package_source.py')
@@ -36,17 +37,17 @@ for path in entries:
             raise RuntimeError('Development browser override in runtime: '+str(path.relative_to(ROOT)))
 out=ROOT/'release'
 out.mkdir(exist_ok=True)
-archive=out/f'NoteStockPublisher-{__version__}-source.zip'
+archive=out/f'NoteStockPublisher-{__version__}-win32-source.zip'
 with zipfile.ZipFile(archive,'w',zipfile.ZIP_DEFLATED) as target:
     for path in sorted(set(entries)):
         assert path.resolve().is_relative_to(ROOT)
-        target.write(path,Path('NoteStockPublisher')/path.relative_to(ROOT))
+        target.write(path,Path('NoteStockPublisher-win32')/path.relative_to(ROOT))
 with zipfile.ZipFile(archive) as target:
     names=target.namelist()
     assert target.testzip() is None
     assert not any(Path(name).suffix.lower() in {'.exe','.dll','.pyd','.sqlite3','.db'} for name in names)
     assert not any(part in {'data','artifacts','.venv','browser-profiles','tests'} for name in names for part in Path(name).parts)
-    assert all(target.read(name)==(ROOT/Path(name).relative_to('NoteStockPublisher')).read_bytes() for name in names)
+    assert all(target.read(name)==(ROOT/Path(name).relative_to('NoteStockPublisher-win32')).read_bytes() for name in names)
 digest=hashlib.sha256(archive.read_bytes()).hexdigest()
 (out/(archive.name+'.sha256')).write_text(digest+'  '+archive.name+'\n',encoding='ascii')
 report={'archive':str(archive),'bytes':archive.stat().st_size,'sha256':digest,'members':len(names),'no_executable_or_user_data':True,'python_syntax':'passed','archive_crc':'passed','source_matches':'passed','no_developer_tests_or_fixed_paths':True}

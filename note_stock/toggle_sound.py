@@ -3,7 +3,7 @@ from pathlib import Path
 
 import winsound
 
-from PySide6.QtCore import QObject, QTimer
+from .qt import QObject, QTimer
 
 
 class ToggleSound(QObject):

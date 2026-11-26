@@ -29,7 +29,7 @@ class Commands:
             if action!='status':
                 if not self.window:
                     raise ValueError('アプリを起動してからDiscord設定を変更してください。')
-                from PySide6.QtCore import QTimer
+                from .qt import QTimer
                 panel=self.window.discord_panel
                 if action=='menu':
                     import asyncio

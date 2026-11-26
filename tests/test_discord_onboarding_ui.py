@@ -1,4 +1,4 @@
-from PySide6.QtWidgets import QApplication,QDialog
+from note_stock.qt import QApplication,QDialog
 from note_stock.discord_ui import DiscordSetupDialog,DiscordPanel
 from note_stock.store import Store
 
@@ -30,9 +30,9 @@ def test_onboarding_choices_back_blank_name_and_cancel():
 
 
 def test_manual_opens_html_and_switches_to_automatic_from_the_guide():
-    from PySide6.QtCore import QPoint,Qt
-    from PySide6.QtTest import QTest
-    from PySide6.QtWidgets import QTextBrowser
+    from note_stock.qt import QPoint,Qt
+    from note_stock.qt import QTest
+    from note_stock.qt import QTextBrowser
 
     app=QApplication.instance() or QApplication([])
     dialog=DiscordSetupDialog()
@@ -53,7 +53,7 @@ def test_manual_opens_html_and_switches_to_automatic_from_the_guide():
 
 
 def test_skip_and_cancel_start_no_worker_and_skip_survives_restart(tmp_path,monkeypatch):
-    from PySide6.QtWidgets import QWidget
+    from note_stock.qt import QWidget
     app=QApplication.instance() or QApplication([])
     class Window(QWidget):
         def __init__(self):
@@ -72,7 +72,7 @@ def test_skip_and_cancel_start_no_worker_and_skip_survives_restart(tmp_path,monk
 
 
 def test_checkbox_opens_same_setup_when_unconfigured_and_reconnects_when_configured(tmp_path,monkeypatch):
-    from PySide6.QtWidgets import QWidget
+    from note_stock.qt import QWidget
     app=QApplication.instance() or QApplication([])
     class Window(QWidget):
         def __init__(self):
@@ -105,7 +105,7 @@ def test_discord_cli_status_never_discloses_secrets(tmp_path):
 
 
 def test_connection_buttons_show_actual_in_progress_state(tmp_path,monkeypatch):
-    from PySide6.QtWidgets import QWidget
+    from note_stock.qt import QWidget
     from types import SimpleNamespace
 
     app=QApplication.instance() or QApplication([])

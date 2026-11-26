@@ -2,7 +2,7 @@
 import hashlib
 import json
 
-from PySide6.QtNetwork import QLocalServer, QLocalSocket
+from .qt import QLocalServer, QLocalSocket
 
 
 def pipe_name(root):

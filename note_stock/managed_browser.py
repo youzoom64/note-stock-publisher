@@ -11,6 +11,19 @@ import psutil
 
 CHOICES={'auto','chrome','edge','chromium'}
 
+
+def is_x86_executable(path):
+    import struct
+    try:
+        with Path(path).open('rb') as file:
+            if file.read(2)!=b'MZ':return False
+            file.seek(60)
+            offset=struct.unpack('<I',file.read(4))[0]
+            file.seek(offset)
+            return file.read(4)==b'PE\0\0' and struct.unpack('<H',file.read(2))[0]==0x14c
+    except (OSError,ValueError,struct.error):
+        return False
+
 class BrowserNotRunning(RuntimeError):
     pass
 
@@ -18,7 +31,8 @@ class BrowserNotRunning(RuntimeError):
 def installed_browser(kind):
     """Read installation locations only; never inspect personal browser profiles."""
     executable='chrome.exe' if kind=='chrome' else 'msedge.exe'
-    candidates=[]
+    from .platform import app_folder
+    candidates=[app_folder()/'runtime32'/'chrome-win32'/'chrome.exe'] if kind=='chrome' else []
     if os.name=='nt':
         import winreg
         for hive in (winreg.HKEY_CURRENT_USER,winreg.HKEY_LOCAL_MACHINE):
@@ -32,14 +46,14 @@ def installed_browser(kind):
     for variable in ('PROGRAMFILES','PROGRAMFILES(X86)','LOCALAPPDATA'):
         if os.environ.get(variable):
             candidates.append(Path(os.environ[variable])/relative)
-    return next((str(path.resolve()) for path in candidates if path.is_file()),None)
+    return next((str(path.resolve()) for path in candidates if path.is_file() and is_x86_executable(path)),None)
 
 
 def select_browser(playwright, preference='auto'):
     if preference not in CHOICES:
         raise ValueError('ブラウザーの設定が正しくありません。')
     for kind in (('chrome','edge','chromium') if preference=='auto' else (preference,)):
-        executable=playwright.chromium.executable_path if kind=='chromium' else installed_browser(kind)
+        executable=installed_browser('chrome') if kind=='chromium' else installed_browser(kind)
         if executable and Path(executable).is_file():
             return kind,executable
     raise RuntimeError('選択したブラウザーが見つかりません。設定で別のブラウザーを選んでください。')

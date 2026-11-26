@@ -71,7 +71,7 @@ class DiagnosticSession:
         self.log = Diagnostics(store)
 
     def configure(self, enabled):
-        from PySide6.QtCore import qInstallMessageHandler
+        from .qt import qInstallMessageHandler
 
         with _write_lock:
             if enabled == self.enabled:

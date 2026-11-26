@@ -1,8 +1,8 @@
 """Show one non-interactive help label next to the cursor inside note Stock."""
 
-from PySide6.QtCore import QEvent, QObject, QPoint, QTimer, Qt
-from PySide6.QtGui import QCursor, QGuiApplication
-from PySide6.QtWidgets import QAbstractButton, QApplication, QComboBox, QLabel, QListWidget, QTabBar, QWidget
+from .qt import QEvent, QObject, QPoint, QTimer, Qt
+from .qt import QCursor, QGuiApplication
+from .qt import QAbstractButton, QApplication, QComboBox, QLabel, QListWidget, QTabBar, QWidget
 
 
 BUTTON_HELP = {

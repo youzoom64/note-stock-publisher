@@ -1,5 +1,5 @@
 """Reservation Activity setup shared by onboarding and the Discord settings tab."""
-from PySide6.QtWidgets import QDialog,QVBoxLayout,QFormLayout,QLabel,QLineEdit,QPushButton,QSpinBox
+from .qt import QDialog,QVBoxLayout,QFormLayout,QLabel,QLineEdit,QPushButton,QSpinBox
 from .relogin import public_url,manager
 from .schedule_activity import ensure_host,stop_host
 

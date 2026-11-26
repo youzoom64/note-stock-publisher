@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 import sys
 
-from PySide6.QtCore import QCoreApplication, QLockFile
+from .qt import QCoreApplication, QLockFile
 
 from .commands import Commands
 from .ipc import request_running

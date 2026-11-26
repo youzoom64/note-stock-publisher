@@ -3,6 +3,9 @@ import os
 import sys
 from pathlib import Path
 
+# The private embedded Python does not add the script folder to sys.path.
+sys.path.insert(0,str(Path(__file__).resolve().parent))
+
 from note_stock.platform import app_folder, prepare_environment
 
 
@@ -65,8 +68,8 @@ def main():
             shutdown(data)
         (data / 'browser-smoke.json').write_text(json.dumps(result),encoding='utf-8')
         return 0 if result['result']=='passed' else 1
-    from PySide6.QtCore import QLockFile, QTimer
-    from PySide6.QtWidgets import QMessageBox
+    from note_stock.qt import QLockFile, QTimer
+    from note_stock.qt import QMessageBox
     from note_stock.windows_accessibility import create_application
     app = None
     diagnostics = None
@@ -109,7 +112,7 @@ def main():
         diagnostics.record('application_start', pid=os.getpid())
         stage = 'create_gui'
         app = create_application(sys.argv[:1])
-        app.setApplicationName("NoteStockPublisher")
+        app.setApplicationName("NoteStockPublisher32")
         app.setQuitOnLastWindowClosed(False)
         from note_stock.ui import MainWindow, STYLE
         app.setStyleSheet(STYLE)

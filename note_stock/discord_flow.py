@@ -23,11 +23,16 @@ def flow(client):
 
 class DiscordUI:
     def __init__(self,client):
-        self.client=client;self.store=client.store;self.lock=asyncio.Lock()
+        self.client=client;self.store=client.store;self._lock=None
         self.screen_message=None
         self.animations={}
         if self.store.setting('discord_active_ui') is None:
             self.store.set_setting('discord_active_ui',uuid.uuid4().hex)
+
+    @property
+    def lock(self):
+        if self._lock is None:self._lock=asyncio.Lock()
+        return self._lock
 
     def current(self): return self.store.setting('discord_active_ui','')
 
