@@ -230,7 +230,8 @@ class ClockTimeEdit(QWidget):
         super().__init__(parent)
         self.clock_open = False
         self.editor=QTimeEdit(time,self)
-        self.editor.setToolTip('数字を直接入力するか、上下の矢印で時刻を変更できます。')
+        self.editor.setButtonSymbols(QTimeEdit.ButtonSymbols.NoButtons)
+        self.editor.setToolTip('数字を直接入力して時刻を変更できます。')
         self.editor.timeChanged.connect(self.timeChanged.emit)
         self.clock_button=QToolButton(self)
         self.clock_button.setText('時計')
