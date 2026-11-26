@@ -18,7 +18,7 @@ try {
         $destination = Join-Path $picker.SelectedPath 'NoteStockPublisher'
         if ($destination.Length -gt 70 -or (Test-Path -LiteralPath $destination)) { throw 'Choose a shorter folder without an existing NoteStockPublisher folder.' }
         New-Item -ItemType Directory -Path $destination | Out-Null
-        foreach ($name in @('main.py','requirements.txt','setup.ps1','start.cmd','README.md','manual.html','VALIDATION.md','THIRD_PARTY_NOTICES.md')) {
+        foreach ($name in @('main.py','requirements.txt','setup.ps1','start.cmd','README.md','README.txt','manual.html','VALIDATION.md','THIRD_PARTY_NOTICES.md')) {
             Copy-Item -LiteralPath (Join-Path $noteRoot $name) -Destination $destination
         }
         Copy-Item -LiteralPath (Join-Path $noteRoot 'note_stock') -Destination $destination -Recurse

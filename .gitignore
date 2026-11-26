@@ -15,6 +15,7 @@ __pycache__/
 !/.gitignore
 !/main.py
 !/README.md
+!/README.txt
 !/manual.html
 !/guide/
 !/VALIDATION.md
