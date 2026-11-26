@@ -6,7 +6,7 @@ from PySide6.QtCore import QDate, QEvent, QPointF, QRectF, Qt, QTime, Signal
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import (
     QButtonGroup, QDialog, QDialogButtonBox, QHBoxLayout, QLabel, QPushButton,
-    QTimeEdit, QToolButton, QVBoxLayout, QWidget,
+    QTimeEdit, QVBoxLayout, QWidget,
 )
 from .calendar_notes import DateNotes
 
@@ -233,7 +233,7 @@ class ClockTimeEdit(QWidget):
         self.editor.setButtonSymbols(QTimeEdit.ButtonSymbols.NoButtons)
         self.editor.setToolTip('数字を直接入力して時刻を変更できます。')
         self.editor.timeChanged.connect(self.timeChanged.emit)
-        self.clock_button=QToolButton(self)
+        self.clock_button=QPushButton(self)
         self.clock_button.setText('時計')
         self.clock_button.setAccessibleName('時計で時刻を選ぶ')
         self.clock_button.setToolTip('時計を開いて時刻を選びます。')

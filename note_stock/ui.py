@@ -79,7 +79,7 @@ QComboBox#post_mode:disabled {background:#d5d9d7; color:#525d56; border-color:#a
 QComboBox#post_mode::drop-down:disabled {background:#d5d9d7; border:0;}
 QComboBox#post_mode::down-arrow:disabled {image:none; width:0; height:0;}
 QLineEdit:focus, QPlainTextEdit:focus {border:1px solid #16845e;}
-QSpinBox#article_sync_minutes {background:#ffffff; color:#25342f; border:1px solid #cddbd2; border-radius:5px; padding:4px;}
+QSpinBox#article_sync_minutes {background:#ffffff; color:#25342f; border:1px solid #cddbd2; border-radius:5px; padding:4px; padding-right:60px;}
 QSpinBox#article_sync_minutes:focus {background:#ffffff; border-color:#16845e;}
 QSpinBox#article_sync_minutes QLineEdit {background:#ffffff; color:#25342f; border:0; padding:0; selection-background-color:#16845e; selection-color:#ffffff;}
 QCalendarWidget {background:#ffffff; color:#25342f;}
