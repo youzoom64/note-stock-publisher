@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 from html import escape
+import json
 
 from PySide6.QtCore import Qt, QDate, QDateTime, QEvent, QTime, QTimeZone, QTimer, QSize, QUrl, QProcess, Signal
 from PySide6.QtGui import QColor, QDesktopServices, QIcon, QPainter, QPalette, QPixmap, QTextCharFormat, QAction, QKeySequence, QDrag, QCursor
@@ -11,7 +12,7 @@ from PySide6.QtWidgets import (
     QFormLayout, QCalendarWidget, QDateEdit, QDateTimeEdit, QDialog, QDialogButtonBox, QCheckBox,
     QMessageBox, QFrame, QScrollArea, QMenu, QTabWidget,
     QButtonGroup, QRadioButton, QSpinBox, QStyle, QStyledItemDelegate, QTableView, QToolButton, QStyleOptionViewItem, QSystemTrayIcon,
-    QAbstractItemView, QToolTip,
+    QAbstractItemView, QToolTip, QProgressBar,
 )
 
 from .platform import autostart_enabled, set_autostart
@@ -817,6 +818,20 @@ class MainWindow(QMainWindow):
         pane.addLayout(filters)
         self.import_button=button('noteの全記事を同期',self.import_drafts,True)
         pane.addWidget(self.import_button)
+        self.sync_progress=QProgressBar()
+        self.sync_progress.setRange(0,0)
+        self.sync_progress.setTextVisible(False)
+        self.sync_progress.setFixedHeight(5)
+        self.sync_progress.setAccessibleName('記事一覧を同期中')
+        self.sync_progress.hide()
+        pane.addWidget(self.sync_progress)
+        self.sync_status=QLabel()
+        self.sync_status.setTextFormat(Qt.TextFormat.PlainText)
+        self.sync_status.setWordWrap(True)
+        self.sync_status.hide()
+        pane.addWidget(self.sync_status)
+        self.sync_job_id=None
+        self.sync_progress_message=''
         tools = QHBoxLayout()
         self.new_button = button("＋ 新規", self.new_post, False, "new")
         self.duplicate_button = button("複製", self.duplicate)
@@ -1037,6 +1052,9 @@ class MainWindow(QMainWindow):
             Diagnostics(self.store).error('application_warning_displayed')
 
     def note_progress(self,message):
+        if getattr(self.worker,'action',None)=='sync_articles':
+            self.sync_progress_message=message
+            self.refresh_sync_status()
         self.statusBar().wait_for_action('note','')
         self.statusBar().showMessage(message)
 
@@ -1173,7 +1191,7 @@ class MainWindow(QMainWindow):
         self.selected_title.setText(('📃 ' if p.get('native_ready') else '')+(p.get('title') or ('無題の原稿' if p else '一覧から記事を選んでください。')))
         self.publish_button.setEnabled(bool(p) and not locked and not self.busy())
         self.publish_button.setEnabled(self.publish_button.isEnabled() and bool(p.get('native_ready')))
-        self.import_button.setEnabled(not self.foreground_busy())
+        self.refresh_sync_status()
         self.edit_button.setEnabled(bool(p) and p.get('status') not in {'posting','unknown','editing','native_reserved'}
                                     and not self.foreground_busy())
         self.cancel_edit_button.setEnabled(self.busy() and self.worker.action=='edit')
@@ -1631,15 +1649,44 @@ class MainWindow(QMainWindow):
         post=self.store.begin_native_edit(post_id)
         self.start_worker('edit',post)
 
+    def refresh_sync_status(self):
+        with self.store.connect() as c:
+            row=c.execute("""SELECT id,state,result FROM jobs WHERE action='sync_articles'
+                ORDER BY CASE state WHEN 'running' THEN 0 WHEN 'waiting' THEN 1 ELSE 2 END,
+                         updated DESC,rowid DESC LIMIT 1""").fetchone()
+        if row and row['id']!=self.sync_job_id:
+            self.sync_job_id=row['id']
+            self.sync_progress_message=''
+        active=bool(row and row['state'] in {'waiting','running'})
+        self.import_button.setEnabled(not active and not self.foreground_busy())
+        self.import_button.setText('同期開始待ち…' if active and row['state']=='waiting'
+                                   else '同期中…' if active else 'noteの全記事を同期')
+        self.sync_progress.setVisible(active)
+        self.sync_status.setVisible(bool(row))
+        if row:
+            failed=row['state']=='failed'
+            self.sync_status.setStyleSheet('color:'+('#a62b25' if failed else '#126b4b')+';font-weight:600;')
+            if active:
+                text=('前の処理が終わり次第、記事一覧の同期を開始します。' if row['state']=='waiting'
+                      else self.sync_progress_message or '記事一覧を取得しています。')
+            else:
+                result=json.loads(row['result'])
+                text=('同期に失敗しました：' if failed else '同期完了：')+result.get('message','')
+            self.sync_status.setText(text)
+        return active
+
     def import_drafts(self):
         if self.foreground_busy():
+            return
+        if self.refresh_sync_status():
             return
         if not self.store.setting('account_verified',False):
             self.fail('設定から利用者本人のnoteアカウントへログインしてください。')
             return
         from .remote import submit
         submit(self.store,'sync_articles')
-        self.notify('記事同期を受け付けました。')
+        self.refresh_sync_status()
+        self.notify('記事一覧の同期を開始します。')
 
     def fetch_article_preview(self,item):
         post_id=item.data(Qt.ItemDataRole.UserRole)
