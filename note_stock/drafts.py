@@ -154,7 +154,7 @@ def read_catalog(adapter):
         return {'items':list(notes.values()),'complete':observed['complete']}
     finally:
         page.remove_listener('response',receive)
-        if not page.is_closed():
-            if len(page.context.pages)==1:
-                page.context.new_page()
+        # Keep the loaded management page when it is the browser's last tab.
+        # Replacing it with a new blank recreates the startup tab we just reused.
+        if not page.is_closed() and len(page.context.pages)>1:
             page.close()
