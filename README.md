@@ -1,4 +1,6 @@
-# noteストック 2.0.0-rc1
+# noteストック 2.0.0-rc2
+
+[HTMLの使い方ガイド](manual.html)では、初回設定・Discord操作・予約投稿・状態表示・トラブル時の確認方法を説明しています。
 
 Windows 11 x64のPCで起動し、スマホのDiscordからnoteの記事を管理するアプリです。ChatGPTの契約・APIキーは不要です。Botを連携すると、Discordの「予約・日時変更」から予約カレンダーを使えます。
 
